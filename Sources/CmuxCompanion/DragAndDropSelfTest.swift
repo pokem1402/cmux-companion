@@ -72,6 +72,30 @@ enum DragAndDropSelfTest {
             inbox: CommandInbox(directoryURL: root.appendingPathComponent("commands", isDirectory: true))
         )
 
+        let initialSets = model.sets
+        for duplicateName in ["Source", "source", "Söurce", "  Source  "] {
+            model.newSetName = duplicateName
+            guard !model.createSet(),
+                  model.sets == initialSets,
+                  model.newSetName == duplicateName,
+                  model.conflictingSetName == "Source" else {
+                throw DragAndDropSelfTestError.assertion("duplicate set creation did not warn atomically")
+            }
+            model.dismissSetNameConflict()
+        }
+        guard model.renameSet(sourceSet.id, to: "SOURCE"),
+              model.sets.first(where: { $0.id == sourceSet.id })?.label == "SOURCE",
+              model.renameSet(sourceSet.id, to: "Source") else {
+            throw DragAndDropSelfTestError.assertion("a set could not be renamed to its own name")
+        }
+        guard !model.renameSet(destinationSet.id, to: " source "),
+              model.sets.first(where: { $0.id == destinationSet.id })?.label == "Destination",
+              model.conflictingSetName == "Source" else {
+            throw DragAndDropSelfTestError.assertion("duplicate set rename did not warn atomically")
+        }
+        model.dismissSetNameConflict()
+        model.newSetName = ""
+
         let movedMember = SurfaceDragPayload(
             origin: .member,
             surfaceID: member.surfaceID,

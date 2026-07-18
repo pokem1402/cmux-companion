@@ -7,8 +7,8 @@ project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 dist_dir="$project_root/dist"
 app_bundle="$dist_dir/CmuxCompanion.app"
 bundle_id=${CMUX_COMPANION_BUNDLE_ID:-dev.cmuxcompanion.app}
-marketing_version=${CMUX_COMPANION_VERSION:-0.1.3}
-build_version=${CMUX_COMPANION_BUILD_NUMBER:-4}
+marketing_version=${CMUX_COMPANION_VERSION:-0.1.4}
+build_version=${CMUX_COMPANION_BUILD_NUMBER:-5}
 minimum_macos=${CMUX_COMPANION_MIN_MACOS:-14.0}
 update_channel=${CMUX_COMPANION_UPDATE_CHANNEL:-preview}
 
@@ -122,6 +122,11 @@ fi
 
 if command -v codesign >/dev/null 2>&1 && [[ "${CMUX_COMPANION_SKIP_CODESIGN:-0}" != "1" ]]; then
     codesign --force --deep --sign - "$temporary_bundle"
+    # Verify while the bundle is still outside Documents/File Provider. Some
+    # providers immediately recreate an empty FinderInfo xattr after the move;
+    # codesign then rejects that metadata even though the sealed files and the
+    # signature have not changed.
+    codesign --verify --deep --strict "$temporary_bundle"
 fi
 
 # The complete temporary bundle is built and optionally signed before the old
@@ -140,10 +145,6 @@ if command -v xattr >/dev/null 2>&1; then
     xattr -dr com.apple.FinderInfo "$app_bundle" 2>/dev/null || true
     xattr -dr com.apple.ResourceFork "$app_bundle" 2>/dev/null || true
 fi
-if command -v codesign >/dev/null 2>&1 && [[ "${CMUX_COMPANION_SKIP_CODESIGN:-0}" != "1" ]]; then
-    codesign --verify --deep --strict "$app_bundle"
-fi
-
 mkdir -p "$dist_dir/bin"
 standalone_cli="$dist_dir/bin/cmux-set.tmp.$$"
 install -m 0755 "$bin_path/cmux-set" "$standalone_cli"

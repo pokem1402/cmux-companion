@@ -50,6 +50,7 @@ final class CompanionAppModel: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastRefreshAt: Date?
     @Published private(set) var lastError: String?
+    @Published private(set) var conflictingSetName: String?
     @Published private(set) var hookSetupFeedback: HookSetupFeedback?
     @Published private(set) var isInstallingHooks = false
     @Published var newSetName = ""
@@ -177,19 +178,20 @@ final class CompanionAppModel: ObservableObject {
         }
     }
 
-    func createSet() {
-        guard ensureStoreWritable() else { return }
+    @discardableResult
+    func createSet() -> Bool {
+        guard ensureStoreWritable() else { return false }
         let label = newSetName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !label.isEmpty else { return }
-        guard !sets.contains(where: {
-            $0.label.compare(label, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
-        }) else {
-            lastError = storeLoadFailureMessage ?? "같은 이름의 세트가 이미 있습니다."
-            return
+        guard !label.isEmpty else { return false }
+        if let existingName = existingSetName(matching: label) {
+            conflictingSetName = existingName
+            return false
         }
         sets.append(WorkSet(label: label, color: paletteColor(for: sets.count)))
         newSetName = ""
+        conflictingSetName = nil
         persistAndEvaluate()
+        return true
     }
 
     func deleteSet(_ setID: UUID) {
@@ -198,19 +200,31 @@ final class CompanionAppModel: ObservableObject {
         persistAndEvaluate()
     }
 
-    func renameSet(_ setID: UUID, to label: String) {
-        guard ensureStoreWritable() else { return }
+    @discardableResult
+    func renameSet(_ setID: UUID, to label: String) -> Bool {
+        guard ensureStoreWritable() else { return false }
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let index = sets.firstIndex(where: { $0.id == setID }) else { return }
-        guard !sets.contains(where: {
-            $0.id != setID
-                && $0.label.compare(trimmed, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
-        }) else {
-            lastError = storeLoadFailureMessage ?? "같은 이름의 세트가 이미 있습니다."
-            return
+        guard !trimmed.isEmpty, let index = sets.firstIndex(where: { $0.id == setID }) else { return false }
+        if let existingName = existingSetName(matching: trimmed, excluding: setID) {
+            conflictingSetName = existingName
+            return false
         }
         sets[index].label = trimmed
+        conflictingSetName = nil
         persistAndEvaluate()
+        return true
+    }
+
+    func existingSetName(matching label: String, excluding setID: UUID? = nil) -> String? {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return sets.first(where: {
+            $0.id != setID
+                && $0.label.compare(
+                    trimmed,
+                    options: [.caseInsensitive, .diacriticInsensitive]
+                ) == .orderedSame
+        })?.label
     }
 
     func setColor(_ setID: UUID, color: String) {
@@ -670,6 +684,10 @@ final class CompanionAppModel: ObservableObject {
 
     func dismissError() {
         lastError = storeLoadFailureMessage
+    }
+
+    func dismissSetNameConflict() {
+        conflictingSetName = nil
     }
 
     private func ensureStoreWritable() -> Bool {

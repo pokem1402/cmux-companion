@@ -87,6 +87,19 @@ struct CompanionRootView: View {
                     + "이 빌드는 Developer ID 서명·notarization 전이며 설치는 자동으로 시작되지 않습니다."
             )
         }
+        .alert(
+            "이미 사용 중인 세트 이름",
+            isPresented: Binding(
+                get: { model.conflictingSetName != nil },
+                set: { isPresented in
+                    if !isPresented { model.dismissSetNameConflict() }
+                }
+            )
+        ) {
+            Button("확인", role: .cancel) { model.dismissSetNameConflict() }
+        } message: {
+            Text("“\(model.conflictingSetName ?? "")” 세트가 이미 있습니다. 다른 이름을 입력해 주세요.")
+        }
     }
 
     private var header: some View {
@@ -280,12 +293,20 @@ struct CompanionRootView: View {
     }
 
     private var createSetRow: some View {
-        HStack(spacing: 8) {
-            TextField("새 세트 이름 (예: PR-142)", text: $model.newSetName)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { model.createSet() }
-            Button("추가") { model.createSet() }
-                .disabled(model.newSetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("새 세트 이름 (예: PR-142)", text: $model.newSetName)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { model.createSet() }
+                Button("추가") { model.createSet() }
+                    .disabled(model.newSetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if let existingName = model.existingSetName(matching: model.newSetName) {
+                Label("“\(existingName)” 세트가 이미 있습니다.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("이미 사용 중인 세트 이름. \(existingName) 세트가 이미 있습니다.")
+            }
         }
         .padding(10)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
@@ -528,8 +549,9 @@ private struct SetCardView: View {
     }
 
     private func commitRename() {
-        model.renameSet(set.id, to: editedName)
-        isRenaming = false
+        if model.renameSet(set.id, to: editedName) {
+            isRenaming = false
+        }
     }
 }
 
