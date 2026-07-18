@@ -7,8 +7,8 @@ project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 dist_dir="$project_root/dist"
 app_bundle="$dist_dir/CmuxCompanion.app"
 bundle_id=${CMUX_COMPANION_BUNDLE_ID:-dev.cmuxcompanion.app}
-marketing_version=${CMUX_COMPANION_VERSION:-0.1.1}
-build_version=${CMUX_COMPANION_BUILD_NUMBER:-2}
+marketing_version=${CMUX_COMPANION_VERSION:-0.1.2}
+build_version=${CMUX_COMPANION_BUILD_NUMBER:-3}
 minimum_macos=${CMUX_COMPANION_MIN_MACOS:-14.0}
 update_channel=${CMUX_COMPANION_UPDATE_CHANNEL:-preview}
 
