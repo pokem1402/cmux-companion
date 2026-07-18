@@ -50,18 +50,18 @@ To produce the two assets required by the in-app updater, set the release
 version and monotonically increasing build number, then run:
 
 ```bash
-CMUX_COMPANION_VERSION=0.1.2 \
-CMUX_COMPANION_BUILD_NUMBER=3 \
+CMUX_COMPANION_VERSION=0.1.3 \
+CMUX_COMPANION_BUILD_NUMBER=4 \
 ./scripts/package-release.sh
 ```
 
 The helper rebuilds the app, sanitizes metadata, creates the ZIP and SHA-256
 sidecar under `dist/release/`, then extracts and verifies the result. For a tag
-named `v0.1.2`, upload both assets without renaming them:
+named `v0.1.3`, upload both assets without renaming them:
 
 ```text
-CmuxCompanion-v0.1.2-macos-arm64.zip
-CmuxCompanion-v0.1.2-macos-arm64.zip.sha256
+CmuxCompanion-v0.1.3-macos-arm64.zip
+CmuxCompanion-v0.1.3-macos-arm64.zip.sha256
 ```
 
 These names are exact: the updater ignores a release if either asset is absent
@@ -102,6 +102,10 @@ any linked member or PR on the fixed `그룹에서 내리기` target at the bott
 remove only the Companion association—the cmux terminal or browser remains
 open and returns to the unlinked tray when it is still live. The `연결` menus
 remain available for keyboard and assistive-technology use.
+
+Each set's `…` menu opens a 16-color quick palette and a native macOS custom
+color picker. Custom colors are stored with the set as `#RRGGBB`, so they
+survive restarts and remain compatible with existing saved data.
 
 Terminal cards show the current surface workload as a small badge. Active cmux
 sessions are normalized to `Codex`, `Claude`, or the original name for another

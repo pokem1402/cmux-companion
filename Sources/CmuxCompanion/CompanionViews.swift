@@ -358,6 +358,7 @@ private struct SetCardView: View {
     @State private var isRenaming = false
     @State private var editedName = ""
     @State private var showAddLink = false
+    @State private var showColorPicker = false
     @State private var linkLabel = "PR 페이지"
     @State private var linkURL = ""
 
@@ -454,12 +455,8 @@ private struct SetCardView: View {
                     Button("1시간") { model.snooze(set.id, minutes: 60) }
                 }
                 Divider()
-                Menu("색상") {
-                    ForEach(["#0A84FF", "#BF5AF2", "#30D158", "#FF9F0A", "#FF375F", "#64D2FF", "#FFD60A"], id: \.self) { color in
-                        Button { model.setColor(set.id, color: color) } label: {
-                            Text(color)
-                        }
-                    }
+                Button("색상…") {
+                    DispatchQueue.main.async { showColorPicker = true }
                 }
                 Button("이름 변경") {
                     editedName = set.label
@@ -473,6 +470,13 @@ private struct SetCardView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .accessibilityLabel("\(set.label) 세트 메뉴")
+            .popover(isPresented: $showColorPicker, arrowEdge: .trailing) {
+                SetColorPicker(
+                    selectedHex: set.color,
+                    onSelect: { model.setColor(set.id, color: $0) }
+                )
+            }
         }
         .padding(.leading, 13)
         .padding(.trailing, 10)
@@ -526,6 +530,155 @@ private struct SetCardView: View {
     private func commitRename() {
         model.renameSet(set.id, to: editedName)
         isRenaming = false
+    }
+}
+
+private struct SetColorPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var colorPanel = CompanionColorPanelCoordinator()
+    let onSelect: (String) -> Void
+    @State private var draftColor: Color
+    @State private var draftHex: String
+    @State private var hexInput: String
+
+    private let columns = Array(repeating: GridItem(.fixed(32), spacing: 8), count: 4)
+
+    init(selectedHex: String, onSelect: @escaping (String) -> Void) {
+        let canonical = CompanionHexColor.canonicalize(selectedHex) ?? "#0A84FF"
+        self.onSelect = onSelect
+        _draftColor = State(initialValue: Color(companionHex: canonical))
+        _draftHex = State(initialValue: canonical)
+        _hexInput = State(initialValue: canonical)
+    }
+
+    private var isHexInputValid: Bool {
+        CompanionHexColor.canonicalize(hexInput) != nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("세트 색상")
+                .font(.headline)
+
+            LazyVGrid(columns: columns, spacing: 8) {
+                ForEach(CompanionColorPalette.presets) { preset in
+                    Button {
+                        colorPanel.finish()
+                        draftHex = preset.hex
+                        draftColor = Color(companionHex: preset.hex)
+                        hexInput = preset.hex
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .fill(Color(companionHex: preset.hex))
+                            Circle()
+                                .stroke(.primary.opacity(0.22), lineWidth: 1)
+                            if draftHex.caseInsensitiveCompare(preset.hex) == .orderedSame {
+                                Image(systemName: "checkmark")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.white)
+                                    .padding(3)
+                                    .background(.black.opacity(0.42), in: Circle())
+                            }
+                        }
+                        .frame(width: 32, height: 32)
+                        .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("\(preset.name) \(preset.hex)")
+                    .accessibilityLabel("\(preset.name) \(preset.hex)")
+                    .accessibilityAddTraits(
+                        draftHex.caseInsensitiveCompare(preset.hex) == .orderedSame
+                            ? .isSelected
+                            : []
+                    )
+                }
+            }
+
+            Divider()
+
+            Button {
+                colorPanel.present(initialColor: draftColor) { color in
+                    draftColor = color
+                    if let hex = color.companionHexString {
+                        draftHex = hex
+                        hexInput = hex
+                    }
+                }
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "eyedropper")
+                        .font(.body.weight(.semibold))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("다른 색 직접 선택…")
+                            .font(.callout.weight(.semibold))
+                        Text("클릭하면 macOS 색상 창이 열립니다")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 4)
+                    Circle()
+                        .fill(draftColor)
+                        .overlay { Circle().stroke(.primary.opacity(0.25), lineWidth: 1) }
+                        .frame(width: 24, height: 24)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(9)
+                .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.accentColor.opacity(0.25), lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("macOS 색상 선택기를 엽니다")
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("또는 HEX 직접 입력")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("#RRGGBB", text: $hexInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.callout.monospaced())
+                    .onChange(of: hexInput) { _, value in
+                        guard let canonical = CompanionHexColor.canonicalize(value) else { return }
+                        draftHex = canonical
+                        draftColor = Color(companionHex: canonical)
+                    }
+                    .onSubmit { applyHexInputToDraft() }
+                if !isHexInputValid {
+                    Text("#RRGGBB 형식으로 입력하세요")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                }
+            }
+
+            HStack {
+                Button("취소") {
+                    colorPanel.finish()
+                    dismiss()
+                }
+                Spacer()
+                Button("적용") {
+                    applyHexInputToDraft()
+                    guard isHexInputValid else { return }
+                    colorPanel.finish()
+                    onSelect(draftHex)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!isHexInputValid)
+            }
+        }
+        .padding(14)
+        .frame(width: 260)
+    }
+
+    private func applyHexInputToDraft() {
+        guard let canonical = CompanionHexColor.canonicalize(hexInput) else { return }
+        draftHex = canonical
+        draftColor = Color(companionHex: canonical)
+        hexInput = canonical
     }
 }
 

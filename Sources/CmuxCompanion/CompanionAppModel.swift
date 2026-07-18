@@ -1515,8 +1515,7 @@ final class CompanionAppModel: ObservableObject {
     }
 
     private func paletteColor(for index: Int) -> String {
-        let colors = ["#0A84FF", "#BF5AF2", "#30D158", "#FF9F0A", "#FF375F", "#64D2FF", "#FFD60A"]
-        return colors[index % colors.count]
+        CompanionColorPalette.hex(for: index)
     }
 
     private func shellQuote(_ value: String) -> String {

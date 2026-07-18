@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import CmuxCompanionCore
 
 private enum DragAndDropSelfTestError: Error, CustomStringConvertible {
@@ -14,6 +15,7 @@ private enum DragAndDropSelfTestError: Error, CustomStringConvertible {
 enum DragAndDropSelfTest {
     @MainActor
     static func run() async throws {
+        try verifyColorPalette()
         guard SurfaceDragTransport.selfTest() else {
             throw DragAndDropSelfTestError.assertion("drag transport token round-trip failed")
         }
@@ -222,6 +224,34 @@ enum DragAndDropSelfTest {
               failingModel.sets == unchangedSets,
               failingModel.lastError?.contains("저장하지 못했습니다") == true else {
             throw DragAndDropSelfTestError.assertion("failed unlink save was not rolled back")
+        }
+    }
+
+    private static func verifyColorPalette() throws {
+        let presets = CompanionColorPalette.presets
+        let uniqueColors = Set(presets.map { $0.hex.uppercased() })
+        let legacyColors: Set<String> = [
+            "#0A84FF", "#BF5AF2", "#30D158", "#FF9F0A", "#FF375F", "#64D2FF", "#FFD60A"
+        ]
+        let roundTripSet = WorkSet(label: "Color", color: "#12ABEF")
+        let roundTripData = try JSONEncoder().encode(roundTripSet)
+        let decodedSet = try JSONDecoder().decode(WorkSet.self, from: roundTripData)
+        guard presets.count >= 16,
+              uniqueColors.count == presets.count,
+              legacyColors.isSubset(of: uniqueColors),
+              presets.allSatisfy({ $0.hex.range(of: #"^#[0-9A-F]{6}$"#, options: .regularExpression) != nil }),
+              CompanionHexColor.canonicalize("#12abef") == "#12ABEF",
+              CompanionHexColor.canonicalize("0af") == "#00AAFF",
+              CompanionHexColor.canonicalize("blue") == "#0A84FF",
+              CompanionHexColor.canonicalize("red") == "#FF453A",
+              CompanionHexColor.canonicalize("GGGGGG") == nil,
+              CompanionHexColor.canonicalize("red!") == nil,
+              Color(companionHex: "#000000").companionHexString == "#000000",
+              Color(companionHex: "#FFFFFF").companionHexString == "#FFFFFF",
+              Color(companionHex: "#808080").companionHexString == "#808080",
+              Color(companionHex: "#12ABEF").companionHexString == "#12ABEF",
+              decodedSet.color == "#12ABEF" else {
+            throw DragAndDropSelfTestError.assertion("color palette or hex conversion is invalid")
         }
     }
 
