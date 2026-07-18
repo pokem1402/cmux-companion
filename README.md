@@ -50,18 +50,18 @@ To produce the two assets required by the in-app updater, set the release
 version and monotonically increasing build number, then run:
 
 ```bash
-CMUX_COMPANION_VERSION=0.1.4 \
-CMUX_COMPANION_BUILD_NUMBER=5 \
+CMUX_COMPANION_VERSION=0.1.5 \
+CMUX_COMPANION_BUILD_NUMBER=6 \
 ./scripts/package-release.sh
 ```
 
 The helper rebuilds the app, sanitizes metadata, creates the ZIP and SHA-256
 sidecar under `dist/release/`, then extracts and verifies the result. For a tag
-named `v0.1.4`, upload both assets without renaming them:
+named `v0.1.5`, upload both assets without renaming them:
 
 ```text
-CmuxCompanion-v0.1.4-macos-arm64.zip
-CmuxCompanion-v0.1.4-macos-arm64.zip.sha256
+CmuxCompanion-v0.1.5-macos-arm64.zip
+CmuxCompanion-v0.1.5-macos-arm64.zip.sha256
 ```
 
 These names are exact: the updater ignores a release if either asset is absent

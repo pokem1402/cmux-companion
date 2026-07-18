@@ -866,6 +866,7 @@ private struct MemberRow: View {
     @State private var editedLabel = ""
 
     var body: some View {
+        let prompt = model.promptPreview(for: member)
         HStack(alignment: .top, spacing: 8) {
             SurfaceDragHandle(
                 payload: SurfaceDragPayload(
@@ -898,10 +899,10 @@ private struct MemberRow: View {
                         Text(member.runtimeState.displayName)
                             .font(.caption)
                             .foregroundStyle(member.runtimeState.color)
-                        RelativeTimestamp(date: member.lastSubmittedAt)
+                        RelativeTimestamp(date: prompt?.date)
                             .font(.caption2)
                     }
-                    if model.showPromptPreview, let text = member.lastSubmittedText, !text.isEmpty {
+                    if model.showPromptPreview, let text = prompt?.text, !text.isEmpty {
                         Text(text.replacingOccurrences(of: "\n", with: " "))
                             .font(.caption)
                             .foregroundStyle(.secondary)

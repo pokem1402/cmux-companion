@@ -41,14 +41,36 @@ extension CmuxSnapshotPart: Equatable where Value: Equatable {}
 public struct CmuxTransportSnapshot: Sendable, Equatable {
     public let tree: CmuxSnapshotPart<CmuxTreeSnapshot>
     public let sessions: CmuxSnapshotPart<CmuxSessionsSnapshot>
+    public let top: CmuxSnapshotPart<CmuxTopSnapshot>
     public let feed: CmuxSnapshotPart<CmuxFeedSnapshot>
     public let notifications: CmuxSnapshotPart<CmuxNotificationsSnapshot>
     public let loadedAt: Date
 
     public var failures: [CmuxSnapshotFailure] {
+        // Live process inspection is an optional badge enhancement. A cmux
+        // build that cannot provide it must not make an otherwise healthy
+        // tree/session connection look broken in the UI.
         [tree.failure, sessions.failure, feed.failure, notifications.failure].compactMap { $0 }
     }
 
+    public init(
+        tree: CmuxSnapshotPart<CmuxTreeSnapshot>,
+        sessions: CmuxSnapshotPart<CmuxSessionsSnapshot>,
+        top: CmuxSnapshotPart<CmuxTopSnapshot>,
+        feed: CmuxSnapshotPart<CmuxFeedSnapshot>,
+        notifications: CmuxSnapshotPart<CmuxNotificationsSnapshot>,
+        loadedAt: Date = Date()
+    ) {
+        self.tree = tree
+        self.sessions = sessions
+        self.top = top
+        self.feed = feed
+        self.notifications = notifications
+        self.loadedAt = loadedAt
+    }
+
+    /// Source-compatible initializer for clients that construct transport
+    /// snapshots without the optional live-process enhancement.
     public init(
         tree: CmuxSnapshotPart<CmuxTreeSnapshot>,
         sessions: CmuxSnapshotPart<CmuxSessionsSnapshot>,
@@ -56,29 +78,43 @@ public struct CmuxTransportSnapshot: Sendable, Equatable {
         notifications: CmuxSnapshotPart<CmuxNotificationsSnapshot>,
         loadedAt: Date = Date()
     ) {
-        self.tree = tree
-        self.sessions = sessions
-        self.feed = feed
-        self.notifications = notifications
-        self.loadedAt = loadedAt
+        self.init(
+            tree: tree,
+            sessions: sessions,
+            top: .failure(CmuxSnapshotFailure(
+                command: CmuxSnapshotLoader.topArguments,
+                error: CmuxTopUnavailableError()
+            )),
+            feed: feed,
+            notifications: notifications,
+            loadedAt: loadedAt
+        )
     }
 }
 
 /// Collects independent cmux snapshots concurrently. A stopped socket can make
-/// tree/feed/notifications unavailable while `sessions` remains readable from
-/// disk, so each result is intentionally represented separately.
+/// tree/top/feed/notifications unavailable while `sessions` remains readable
+/// from disk, so each result is intentionally represented separately.
 public final class CmuxSnapshotLoader: Sendable {
     // cmux defaults to short refs (`workspace:1`, `surface:2`) in output.
     // Persistent linking and the first-party cmux:// deep links require UUIDs.
     public static let treeArguments = ["--id-format", "uuids", "tree", "--all", "--json"]
     public static let sessionsArguments = ["sessions", "--all", "--json"]
+    public static let topArguments = [
+        "--id-format", "uuids", "top", "--all", "--processes", "--flat", "--format", "tsv",
+    ]
     public static let feedArguments = ["rpc", "feed.list", "{}"]
     public static let notificationsArguments = ["--json", "list-notifications"]
 
     private let runner: any CmuxCommandRunning
+    private let topTimeout: Duration
 
-    public init(runner: any CmuxCommandRunning) {
+    public init(
+        runner: any CmuxCommandRunning,
+        topTimeout: Duration = .seconds(2)
+    ) {
         self.runner = runner
+        self.topTimeout = topTimeout
     }
 
     public convenience init(locator: CmuxExecutableLocator = CmuxExecutableLocator()) throws {
@@ -94,6 +130,11 @@ public final class CmuxSnapshotLoader: Sendable {
             arguments: Self.sessionsArguments,
             normalize: { CmuxSessionsSnapshot(raw: $0) }
         )
+        async let top = loadTextPart(
+            arguments: Self.topArguments,
+            timeout: topTimeout,
+            normalize: { try CmuxTopSnapshot(tsv: $0) }
+        )
         async let feed = loadPart(
             arguments: Self.feedArguments,
             normalize: { CmuxFeedSnapshot(raw: $0) }
@@ -106,6 +147,7 @@ public final class CmuxSnapshotLoader: Sendable {
         return await CmuxTransportSnapshot(
             tree: tree,
             sessions: sessions,
+            top: top,
             feed: feed,
             notifications: notifications
         )
@@ -117,6 +159,10 @@ public final class CmuxSnapshotLoader: Sendable {
 
     public func loadSessions() async throws -> CmuxSessionsSnapshot {
         CmuxSessionsSnapshot(raw: try await loadJSON(arguments: Self.sessionsArguments))
+    }
+
+    public func loadTop() async throws -> CmuxTopSnapshot {
+        try CmuxTopSnapshot(tsv: await loadText(arguments: Self.topArguments))
     }
 
     public func loadFeed() async throws -> CmuxFeedSnapshot {
@@ -138,12 +184,64 @@ public final class CmuxSnapshotLoader: Sendable {
         }
     }
 
+    private func loadTextPart<Value: Sendable>(
+        arguments: [String],
+        timeout: Duration,
+        normalize: @escaping @Sendable (String) throws -> Value
+    ) async -> CmuxSnapshotPart<Value> {
+        do {
+            return .success(try await withThrowingTaskGroup(of: Value.self) { group in
+                group.addTask { [self] in
+                    try normalize(try await loadText(arguments: arguments))
+                }
+                group.addTask {
+                    try await Task.sleep(for: timeout)
+                    try Task.checkCancellation()
+                    throw CmuxSnapshotTimeoutError(command: arguments)
+                }
+                defer { group.cancelAll() }
+                guard let first = try await group.next() else {
+                    throw CancellationError()
+                }
+                return first
+            })
+        } catch {
+            return .failure(CmuxSnapshotFailure(command: arguments, error: error))
+        }
+    }
+
     private func loadJSON(arguments: [String]) async throws -> JSONValue {
+        try CmuxJSON.decode(await loadData(arguments: arguments))
+    }
+
+    private func loadText(arguments: [String]) async throws -> String {
+        let data = try await loadData(arguments: arguments)
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw CmuxTransportError.invalidUTF8
+        }
+        return value
+    }
+
+    private func loadData(arguments: [String]) async throws -> Data {
         let result = try await runner.run(arguments: arguments)
         guard !result.standardOutput.isEmpty else {
             throw CmuxTransportError.emptyOutput(command: arguments)
         }
-        return try CmuxJSON.decode(result.standardOutput)
+        return result.standardOutput
+    }
+}
+
+private struct CmuxSnapshotTimeoutError: Error, LocalizedError, Sendable {
+    let command: [String]
+
+    var errorDescription: String? {
+        "Timed out while loading optional cmux process data: \(command.joined(separator: " "))"
+    }
+}
+
+private struct CmuxTopUnavailableError: Error, LocalizedError, Sendable {
+    var errorDescription: String? {
+        "Optional cmux process data was not supplied"
     }
 }
 

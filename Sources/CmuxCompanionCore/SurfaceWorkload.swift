@@ -58,6 +58,40 @@ public enum SurfaceWorkload: Equatable, Sendable {
         )
     }
 
+    /// Resolves the display badge without treating a missing hook session as
+    /// proof of a shell when a fresh process scan saw conflicting or unknown
+    /// processes. Hook-backed identity wins whenever it is classifiable.
+    public static func resolved(
+        currentSession session: CmuxTransportSession?,
+        processWorkload: SurfaceWorkload?,
+        hasFreshProcessSnapshot: Bool,
+        isBrowser: Bool = false,
+        occupancyIsAuthoritative: Bool
+    ) -> SurfaceWorkload {
+        if isBrowser { return .browser }
+
+        if let session {
+            let sessionWorkload = SurfaceWorkload(
+                currentSession: session,
+                occupancyIsAuthoritative: occupancyIsAuthoritative
+            )
+            guard sessionWorkload == .unknown else { return sessionWorkload }
+            switch processWorkload {
+            case .codex?, .claude?: return processWorkload ?? .unknown
+            default: return .unknown
+            }
+        }
+
+        if hasFreshProcessSnapshot {
+            return processWorkload ?? .unknown
+        }
+
+        return SurfaceWorkload(
+            currentSession: nil,
+            occupancyIsAuthoritative: occupancyIsAuthoritative
+        )
+    }
+
     public var displayName: String {
         switch self {
         case .codex: return "Codex"

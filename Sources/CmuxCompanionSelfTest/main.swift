@@ -493,6 +493,49 @@ private func testTransportNormalization() throws {
         CmuxSnapshotLoader.treeArguments == ["--id-format", "uuids", "tree", "--all", "--json"],
         "tree command must request UUID output before the subcommand"
     )
+    try require(
+        CmuxSnapshotLoader.topArguments == [
+            "--id-format", "uuids", "top", "--all", "--processes", "--flat", "--format", "tsv",
+        ],
+        "top command must request UUID process output"
+    )
+
+    let topTSV = [
+        "0.0\t20\t2\tsurface\tsurface-codex\tpane-1\tCodex",
+        "0.0\t10\t1\tprocess\t41\tsurface-codex\tzsh",
+        "0.1\t100\t1\tprocess\t42\tsurface-codex\tcodex",
+        "0.0\t20\t1\tsurface\tsurface-shell\tpane-1\tShell",
+        "0.0\t20\t1\tprocess\t43\tsurface-shell\t/bin/bash",
+    ].joined(separator: "\n")
+    let top = try CmuxTopSnapshot(tsv: topTSV)
+    try require(
+        top.workload(forSurfaceID: "surface-codex") == .codex,
+        "live Codex processes must classify their surface"
+    )
+    try require(
+        top.agentWorkload(forProcessID: 42, onSurfaceID: "surface-codex") == .codex,
+        "exact Codex PID evidence must remain surface-scoped"
+    )
+    try require(
+        top.workload(forSurfaceID: "surface-shell") == .shell,
+        "shell-only process surfaces must classify as Shell"
+    )
+
+    let inactivePromptSessions = CmuxSessionsSnapshot(raw: try CmuxJSON.decode(#"""
+    {"sessions":[
+      {"session_id":"prompt-session","surface_id":"surface-codex","pid":42,
+       "agent":"codex","agent_lifecycle":"idle","active_for_surface":false}
+    ]}
+    """#)).sessions
+    let displaySources = CmuxAgentSessionResolver.promptDisplaySourcesBySurface(
+        inactivePromptSessions,
+        corroboratedBy: top
+    )
+    try require(
+        displaySources["surface-codex"]?.sessionID == "prompt-session"
+            && CmuxAgentSessionResolver.currentBySurface(inactivePromptSessions).isEmpty,
+        "exact live PID evidence may restore prompt display but not session ownership"
+    )
 
     let sessionsJSON = #"{"sessions":[{"agent":"codex","session_id":"session-1","workspace_id":"ws1","surface_id":"s1","agent_lifecycle":"running","updated_at_unix":100}]}"#
     let sessions = CmuxSessionsSnapshot(raw: try CmuxJSON.decode(sessionsJSON))
@@ -522,6 +565,25 @@ private func testSurfaceWorkloadAndSessionResolution() throws {
     try require(
         SurfaceWorkload(agent: "custom-agent") == .otherAgent("custom-agent"),
         "unknown agent names must remain visible"
+    )
+
+    try require(
+        SurfaceWorkload.resolved(
+            currentSession: nil,
+            processWorkload: .codex,
+            hasFreshProcessSnapshot: true,
+            occupancyIsAuthoritative: true
+        ) == .codex,
+        "a fresh live process must classify a hookless Codex surface"
+    )
+    try require(
+        SurfaceWorkload.resolved(
+            currentSession: nil,
+            processWorkload: nil,
+            hasFreshProcessSnapshot: true,
+            occupancyIsAuthoritative: true
+        ) == .unknown,
+        "a fresh but inconclusive process scan must not guess Shell"
     )
 
     let raw = try CmuxJSON.decode(#"""

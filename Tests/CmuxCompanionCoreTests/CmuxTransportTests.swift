@@ -96,6 +96,177 @@ final class CmuxTransportTests: XCTestCase {
         XCTAssertEqual(SurfaceWorkload(agent: "custom-agent"), .otherAgent("custom-agent"))
     }
 
+    func testFreshProcessWorkloadSupplementsButNeverOverridesKnownSession() throws {
+        let sessions = CmuxSessionsSnapshot(raw: try CmuxJSON.decode(#"""
+        {"sessions":[
+          {"session_id":"claude","surface_id":"surface-1","agent":"claude",
+           "active_for_surface":true},
+          {"session_id":"unnamed","surface_id":"surface-2",
+           "active_for_surface":true}
+        ]}
+        """#)).sessions
+
+        XCTAssertEqual(
+            SurfaceWorkload.resolved(
+                currentSession: sessions[0],
+                processWorkload: .codex,
+                hasFreshProcessSnapshot: true,
+                occupancyIsAuthoritative: true
+            ),
+            .claude
+        )
+        XCTAssertEqual(
+            SurfaceWorkload.resolved(
+                currentSession: sessions[1],
+                processWorkload: .codex,
+                hasFreshProcessSnapshot: true,
+                occupancyIsAuthoritative: true
+            ),
+            .codex
+        )
+        XCTAssertEqual(
+            SurfaceWorkload.resolved(
+                currentSession: sessions[1],
+                processWorkload: .shell,
+                hasFreshProcessSnapshot: true,
+                occupancyIsAuthoritative: true
+            ),
+            .unknown
+        )
+        XCTAssertEqual(
+            SurfaceWorkload.resolved(
+                currentSession: nil,
+                processWorkload: nil,
+                hasFreshProcessSnapshot: true,
+                occupancyIsAuthoritative: true
+            ),
+            .unknown
+        )
+        XCTAssertEqual(
+            SurfaceWorkload.resolved(
+                currentSession: nil,
+                processWorkload: nil,
+                hasFreshProcessSnapshot: false,
+                occupancyIsAuthoritative: true
+            ),
+            .shell
+        )
+        XCTAssertEqual(
+            SurfaceWorkload.resolved(
+                currentSession: sessions[0],
+                processWorkload: .codex,
+                hasFreshProcessSnapshot: true,
+                isBrowser: true,
+                occupancyIsAuthoritative: true
+            ),
+            .browser
+        )
+    }
+
+    func testTopSnapshotClassifiesProcessTreesTagsAndShells() throws {
+        let tsv = [
+            "0.0\t0\t0\ttotal\ttotal\t\t",
+            "0.1\t100\t1\ttag\tworkspace-1:tag:claude_code\tworkspace-1\tNeeds input",
+            "0.1\t100\t1\tprocess\t41\tworkspace-1:tag:claude_code\t2.1.114",
+            "0.2\t200\t3\tsurface\tsurface-codex\tpane-1\tProject\twith tab",
+            "0.0\t10\t1\tprocess\t10\tsurface-codex\tnode",
+            "0.1\t100\t1\tprocess\t11\t10\t/opt/tools/codex",
+            "0.0\t10\t1\tprocess\t12\tsurface-codex\tzsh",
+            "0.1\t120\t2\tsurface\tsurface-claude\tpane-1\tClaude",
+            "0.1\t100\t1\tprocess\t41\tsurface-claude\t2.1.114",
+            "0.0\t20\t1\tprocess\t42\tsurface-claude\t-zsh",
+            "0.0\t20\t1\tsurface\tsurface-shell\tpane-1\tShell",
+            "0.0\t20\t1\tprocess\t43\tsurface-shell\t/bin/bash",
+            "0.0\t20\t1\tsurface\tsurface-unknown\tpane-1\tUnknown",
+            "0.0\t20\t1\tprocess\t50\tsurface-unknown\tpython3",
+        ].joined(separator: "\n")
+
+        let snapshot = try CmuxTopSnapshot(tsv: tsv)
+
+        XCTAssertEqual(snapshot.workload(forSurfaceID: "surface-codex"), .codex)
+        XCTAssertEqual(snapshot.workload(forSurfaceID: "surface-claude"), .claude)
+        XCTAssertEqual(snapshot.workload(forSurfaceID: "surface-shell"), .shell)
+        XCTAssertNil(snapshot.workload(forSurfaceID: "surface-unknown"))
+        XCTAssertEqual(snapshot.processIDs(forSurfaceID: "surface-codex"), [10, 11, 12])
+        XCTAssertEqual(snapshot.processIDs(forSurfaceID: "surface-claude"), [41, 42])
+        XCTAssertEqual(snapshot.processIDs(forSurfaceID: "surface-unknown"), [50])
+        XCTAssertTrue(snapshot.processIDs(forSurfaceID: "missing-surface").isEmpty)
+        XCTAssertNil(snapshot.agentWorkload(forProcessID: 10, onSurfaceID: "surface-codex"))
+        XCTAssertEqual(
+            snapshot.agentWorkload(forProcessID: 11, onSurfaceID: "surface-codex"),
+            .codex
+        )
+        XCTAssertEqual(
+            snapshot.agentWorkload(forProcessID: 41, onSurfaceID: "surface-claude"),
+            .claude
+        )
+        XCTAssertNil(snapshot.agentWorkload(forProcessID: 41, onSurfaceID: "surface-codex"))
+    }
+
+    func testTopSnapshotRejectsConflictingAgentEvidenceAndMalformedTSV() throws {
+        let conflict = [
+            "0.1\t50\t1\ttag\tworkspace-1:tag:claude_code\tworkspace-1\tRunning",
+            "0.1\t50\t1\tprocess\t10\tworkspace-1:tag:claude_code\tcodex",
+            "0.1\t100\t2\tsurface\tsurface-1\tpane-1\tAgent",
+            "0.1\t50\t1\tprocess\t10\tsurface-1\tcodex",
+            "0.1\t50\t1\tprocess\t11\tsurface-1\tclaude",
+        ].joined(separator: "\n")
+        let snapshot = try CmuxTopSnapshot(tsv: conflict)
+        XCTAssertNil(snapshot.workload(forSurfaceID: "surface-1"))
+        XCTAssertEqual(snapshot.processIDs(forSurfaceID: "surface-1"), [10, 11])
+        XCTAssertNil(snapshot.agentWorkload(forProcessID: 10, onSurfaceID: "surface-1"))
+        XCTAssertEqual(snapshot.agentWorkload(forProcessID: 11, onSurfaceID: "surface-1"), .claude)
+
+        XCTAssertThrowsError(try CmuxTopSnapshot(tsv: "")) { error in
+            XCTAssertEqual(error as? CmuxTopSnapshotError, .noRows)
+        }
+        XCTAssertThrowsError(try CmuxTopSnapshot(tsv: "not tsv")) { error in
+            XCTAssertEqual(error as? CmuxTopSnapshotError, .invalidTSVLine(1))
+        }
+    }
+
+    func testClaudeTagWinsOverNestedAgentHelper() throws {
+        let tsv = [
+            "0.1\t50\t1\ttag\tworkspace-1:tag:claude_code\tworkspace-1\tRunning",
+            "0.1\t50\t1\tprocess\t41\tworkspace-1:tag:claude_code\t2.1.114",
+            "0.1\t100\t3\tsurface\tsurface-1\tpane-1\tReview",
+            "0.1\t50\t1\tprocess\t41\tsurface-1\t2.1.114",
+            "0.1\t50\t1\tprocess\t42\t41\tcodex",
+            "0.0\t10\t1\tprocess\t43\tsurface-1\tzsh",
+        ].joined(separator: "\n")
+
+        XCTAssertEqual(
+            try CmuxTopSnapshot(tsv: tsv).workload(forSurfaceID: "surface-1"),
+            .claude
+        )
+    }
+
+    func testInactiveSessionCanSupplyPromptDisplayButNotCurrentOwnership() throws {
+        let top = try CmuxTopSnapshot(tsv: [
+            "0.1\t100\t2\tsurface\tsurface-1\tpane-1\tCodex",
+            "0.1\t90\t1\tprocess\t42\tsurface-1\tcodex",
+            "0.0\t10\t1\tprocess\t43\tsurface-1\tzsh",
+        ].joined(separator: "\n"))
+        let sessions = CmuxSessionsSnapshot(raw: try CmuxJSON.decode(#"""
+        {"sessions":[
+          {"session_id":"live-prompt","surface_id":"surface-1","pid":42,
+           "agent":"codex","agent_lifecycle":"idle","active_for_surface":false,
+           "transcript_path":"/tmp/live.jsonl"},
+          {"session_id":"stale-prompt","surface_id":"surface-2","pid":99,
+           "agent":"codex","agent_lifecycle":"idle","active_for_surface":false}
+        ]}
+        """#)).sessions
+
+        XCTAssertTrue(CmuxAgentSessionResolver.currentBySurface(sessions).isEmpty)
+        let displaySources = CmuxAgentSessionResolver.promptDisplaySourcesBySurface(
+            sessions,
+            corroboratedBy: top
+        )
+        XCTAssertEqual(displaySources["surface-1"]?.sessionID, "live-prompt")
+        XCTAssertEqual(displaySources["surface-1"]?.transcriptPath, "/tmp/live.jsonl")
+        XCTAssertNil(displaySources["surface-2"])
+    }
+
     func testCurrentSessionResolverRejectsHistoricalSurfaceOwners() throws {
         let snapshot = CmuxSessionsSnapshot(raw: try CmuxJSON.decode(#"""
         {"sessions":[
@@ -157,9 +328,14 @@ final class CmuxTransportTests: XCTestCase {
     }
 
     func testSnapshotFailuresDoNotSuppressOtherComponents() async throws {
+        let topTSV = [
+            "0.1\t100\t1\tsurface\tsurface-1\tpane-1\tCodex",
+            "0.1\t100\t1\tprocess\t42\tsurface-1\tcodex",
+        ].joined(separator: "\n")
         let runner = FakeCommandRunner(responses: [
             CmuxSnapshotLoader.treeArguments: .failure(FakeError.expected),
             CmuxSnapshotLoader.sessionsArguments: .success(#"{"sessions":[{"session_id":"s1"}]}"#),
+            CmuxSnapshotLoader.topArguments: .success(topTSV),
             CmuxSnapshotLoader.feedArguments: .success("not-json"),
             CmuxSnapshotLoader.notificationsArguments: .success(#"[{"id":"n1"}]"#)
         ])
@@ -167,21 +343,60 @@ final class CmuxTransportTests: XCTestCase {
 
         XCTAssertNotNil(snapshot.tree.failure)
         XCTAssertEqual(snapshot.sessions.value?.sessions.first?.id, "s1")
+        XCTAssertEqual(snapshot.top.value?.workload(forSurfaceID: "surface-1"), .codex)
+        XCTAssertEqual(snapshot.top.value?.processIDs(forSurfaceID: "surface-1"), [42])
         XCTAssertNotNil(snapshot.feed.failure)
         XCTAssertEqual(snapshot.notifications.value?.notifications.first?.id, "n1")
         XCTAssertEqual(snapshot.failures.count, 2)
         XCTAssertEqual(Set(runner.recordedArguments), Set([
             CmuxSnapshotLoader.treeArguments,
             CmuxSnapshotLoader.sessionsArguments,
+            CmuxSnapshotLoader.topArguments,
             CmuxSnapshotLoader.feedArguments,
             CmuxSnapshotLoader.notificationsArguments
         ]))
+    }
+
+    func testOptionalTopFailureDoesNotDegradeHealthyCmuxSnapshot() async throws {
+        let runner = FakeCommandRunner(responses: [
+            CmuxSnapshotLoader.treeArguments: .success(#"{"windows":[]}"#),
+            CmuxSnapshotLoader.sessionsArguments: .success(#"{"sessions":[]}"#),
+            CmuxSnapshotLoader.topArguments: .failure(FakeError.expected),
+            CmuxSnapshotLoader.feedArguments: .success(#"{"items":[]}"#),
+            CmuxSnapshotLoader.notificationsArguments: .success("[]"),
+        ])
+
+        let snapshot = await CmuxSnapshotLoader(runner: runner).load()
+
+        XCTAssertNotNil(snapshot.top.failure)
+        XCTAssertTrue(snapshot.failures.isEmpty)
+    }
+
+    func testOptionalTopTimeoutCannotBlockWholeRefresh() async throws {
+        let runner = HangingTopRunner()
+        let startedAt = ContinuousClock.now
+
+        let snapshot = await CmuxSnapshotLoader(
+            runner: runner,
+            topTimeout: .milliseconds(20)
+        ).load()
+
+        XCTAssertNotNil(snapshot.top.failure)
+        XCTAssertNotNil(snapshot.tree.value)
+        XCTAssertLessThan(startedAt.duration(to: .now), .seconds(1))
     }
 
     func testTreeSnapshotRequestsDurableUUIDsUsingGlobalOption() {
         XCTAssertEqual(
             CmuxSnapshotLoader.treeArguments,
             ["--id-format", "uuids", "tree", "--all", "--json"]
+        )
+        XCTAssertEqual(
+            CmuxSnapshotLoader.topArguments,
+            [
+                "--id-format", "uuids", "top", "--all", "--processes", "--flat",
+                "--format", "tsv",
+            ]
         )
     }
 
@@ -499,5 +714,27 @@ private final class FakeLineStreamer: CmuxLineStreaming, @unchecked Sendable {
             for line in lines { continuation.yield(line) }
             continuation.finish()
         }
+    }
+}
+
+private final class HangingTopRunner: CmuxCommandRunning, @unchecked Sendable {
+    func run(arguments: [String], environment: [String: String]) async throws -> CmuxProcessResult {
+        if arguments == CmuxSnapshotLoader.topArguments {
+            try await Task.sleep(for: .seconds(60))
+        }
+        let output: String
+        switch arguments {
+        case CmuxSnapshotLoader.treeArguments: output = #"{"windows":[]}"#
+        case CmuxSnapshotLoader.sessionsArguments: output = #"{"sessions":[]}"#
+        case CmuxSnapshotLoader.feedArguments: output = #"{"items":[]}"#
+        case CmuxSnapshotLoader.notificationsArguments: output = "[]"
+        default: throw FakeError.expected
+        }
+        return CmuxProcessResult(
+            arguments: arguments,
+            exitCode: 0,
+            standardOutput: Data(output.utf8),
+            standardError: Data()
+        )
     }
 }

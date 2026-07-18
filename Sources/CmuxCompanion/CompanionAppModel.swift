@@ -16,6 +16,8 @@ struct LiveSurface: Identifiable, Equatable {
     var runtimeState: MemberRuntimeState
     var lastSubmittedText: String?
     var lastSubmittedAt: Date?
+    var displayOnlyPromptText: String?
+    var displayOnlyPromptAt: Date?
     var isRemote: Bool
     var workload: SurfaceWorkload
 
@@ -736,6 +738,25 @@ final class CompanionAppModel: ObservableObject {
         return SurfaceWorkload(agent: member.agent)
     }
 
+    func promptPreview(for member: WorkMember) -> (text: String, date: Date?)? {
+        let live = member.surfaceID.flatMap { surfaceID in
+            liveSurfaces.first { $0.id == surfaceID }
+        } ?? member.sessionID.flatMap { sessionID in
+            liveSurfaces.first { $0.sessionID == sessionID }
+        }
+
+        if let text = live?.displayOnlyPromptText, !text.isEmpty {
+            return (text, live?.displayOnlyPromptAt)
+        }
+        if let text = live?.lastSubmittedText, !text.isEmpty {
+            return (text, live?.lastSubmittedAt)
+        }
+        if let text = member.lastSubmittedText, !text.isEmpty {
+            return (text, member.lastSubmittedAt)
+        }
+        return nil
+    }
+
     var hasLinkedDraggableItems: Bool {
         sets.contains { !$0.members.isEmpty || !$0.attachments.isEmpty }
     }
@@ -911,6 +932,7 @@ final class CompanionAppModel: ObservableObject {
         let freshTree = snapshot.tree.value
         let freshSessions = snapshot.sessions.value?.sessions
         let freshFeedItems = snapshot.feed.value?.items
+        let freshTop = snapshot.top.value
         let treeIsAuthoritative = freshTree != nil
         let sessionsAreAuthoritative = freshSessions != nil
 
@@ -953,6 +975,7 @@ final class CompanionAppModel: ObservableObject {
             tree: tree,
             sessions: sessions,
             feedItems: feedItems,
+            processWorkloads: freshTop,
             occupancyIsAuthoritative: treeIsAuthoritative && sessionsAreAuthoritative
         )
 
@@ -982,19 +1005,40 @@ final class CompanionAppModel: ObservableObject {
         tree: CmuxTreeSnapshot?,
         sessions: [CmuxTransportSession],
         feedItems: [CmuxTransportFeedItem],
+        processWorkloads: CmuxTopSnapshot?,
         occupancyIsAuthoritative: Bool
     ) -> [LiveSurface] {
         guard let tree else { return [] }
         var result: [LiveSurface] = []
         let sessionBySurface = CmuxAgentSessionResolver.currentBySurface(sessions)
+        let promptSourceBySurface = processWorkloads.map {
+            CmuxAgentSessionResolver.promptDisplaySourcesBySurface(
+                sessions,
+                corroboratedBy: $0
+            )
+        } ?? [:]
 
         for window in tree.windows {
             for workspace in window.workspaces {
                 for surface in workspace.surfaces {
                     let session = sessionBySurface[surface.id]
                         ?? surface.ref.flatMap { sessionBySurface[$0] }
-                    let prompt = session.flatMap { latestPrompt(for: $0, in: feedItems) }
                     let kind = surface.type ?? "terminal"
+                    let prompt = session.flatMap { latestPrompt(for: $0, in: feedItems) }
+                    let displayPrompt = session == nil && kind.lowercased() != "browser"
+                        ? promptSourceBySurface[surface.id].flatMap {
+                            latestPrompt(for: $0, in: feedItems)
+                        }
+                        : nil
+                    let processWorkload = processWorkloads?.workload(forSurfaceID: surface.id)
+                        ?? surface.ref.flatMap { processWorkloads?.workload(forSurfaceID: $0) }
+                    let workload = SurfaceWorkload.resolved(
+                        currentSession: session,
+                        processWorkload: processWorkload,
+                        hasFreshProcessSnapshot: processWorkloads != nil,
+                        isBrowser: kind.lowercased() == "browser",
+                        occupancyIsAuthoritative: occupancyIsAuthoritative
+                    )
                     result.append(
                         LiveSurface(
                             id: surface.id,
@@ -1009,13 +1053,11 @@ final class CompanionAppModel: ObservableObject {
                             runtimeState: session.map(runtimeState(for:)) ?? .unknown,
                             lastSubmittedText: prompt?.text,
                             lastSubmittedAt: prompt?.date,
+                            displayOnlyPromptText: displayPrompt?.text,
+                            displayOnlyPromptAt: displayPrompt?.date,
                             isRemote: session.map { CmuxRemoteEventIdentity.isRemoteSessionID($0.id) }
                                 ?? false,
-                            workload: SurfaceWorkload(
-                                currentSession: session,
-                                isBrowser: kind.lowercased() == "browser",
-                                occupancyIsAuthoritative: occupancyIsAuthoritative
-                            )
+                            workload: workload
                         )
                     )
                 }
@@ -1217,9 +1259,35 @@ final class CompanionAppModel: ObservableObject {
         for session: CmuxTransportSession,
         in items: [CmuxTransportFeedItem]
     ) -> (text: String, date: Date?)? {
-        let feedPrompt = latestPrompt(sessionID: session.id, source: session.agent, in: items)
+        latestPrompt(
+            sessionID: session.id,
+            source: session.agent,
+            transcriptPath: session.transcriptPath,
+            in: items
+        )
+    }
+
+    private func latestPrompt(
+        for source: CmuxPromptDisplaySource,
+        in items: [CmuxTransportFeedItem]
+    ) -> (text: String, date: Date?)? {
+        latestPrompt(
+            sessionID: source.sessionID,
+            source: source.source,
+            transcriptPath: source.transcriptPath,
+            in: items
+        )
+    }
+
+    private func latestPrompt(
+        sessionID: String,
+        source: String?,
+        transcriptPath: String?,
+        in items: [CmuxTransportFeedItem]
+    ) -> (text: String, date: Date?)? {
+        let feedPrompt = latestPrompt(sessionID: sessionID, source: source, in: items)
         let transcriptPrompt: (text: String, date: Date?)?
-        if let path = session.transcriptPath {
+        if let path = transcriptPath {
             let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
             let modificationDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate
