@@ -12,6 +12,7 @@ target_executable="$target_app/Contents/MacOS/CmuxCompanion"
 launch=0
 replace=0
 was_running=0
+running_pid_hint=${CMUX_COMPANION_RUNNING_PID:-}
 
 usage() {
     cat <<'EOF'
@@ -35,6 +36,11 @@ while [[ $# -gt 0 ]]; do
         *) printf '%s\n' "install-local: unknown option: $1" >&2; exit 2 ;;
     esac
 done
+
+if [[ -n "$running_pid_hint" && ! "$running_pid_hint" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "install-local: CMUX_COMPANION_RUNNING_PID must be numeric" >&2
+    exit 2
+fi
 
 if [[ ! -d "$source_app" ]]; then
     printf '%s\n' "install-local: packaged app not found: $source_app" >&2
@@ -93,12 +99,19 @@ running_pids_for_target() {
     local pid command_path
     while IFS= read -r pid; do
         [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        if [[ -n "$running_pid_hint" && "$pid" == "$running_pid_hint" ]]; then
+            kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
+            continue
+        fi
         command_path=$(ps -p "$pid" -o command= 2>/dev/null || true)
         command_path=${command_path#"${command_path%%[![:space:]]*}"}
         case "$command_path" in
             "$target_executable"|"$target_executable "*) printf '%s\n' "$pid" ;;
         esac
-    done < <(pgrep -x CmuxCompanion 2>/dev/null || true)
+    done < <(
+        [[ -n "$running_pid_hint" ]] && printf '%s\n' "$running_pid_hint"
+        pgrep -x CmuxCompanion 2>/dev/null || true
+    ) | sort -un
 }
 
 running_pids=$(running_pids_for_target)
@@ -157,13 +170,16 @@ if [[ "$installed_id" != "$expected_bundle_id" || ! -x "$target_executable" ]] \
     rollback_publish "published app failed final verification"
     exit 1
 fi
+if [[ "$launch" -eq 1 || "$was_running" -eq 1 ]]; then
+    if ! open "$target_app"; then
+        rollback_publish "new app could not be relaunched"
+        exit 1
+    fi
+fi
+
 trap - EXIT HUP INT TERM
 
 printf '%s\n' "Installed: $target_app"
 if [[ -n "$backup_app" ]]; then
     printf '%s\n' "Previous copy kept at: $backup_app"
-fi
-
-if [[ "$launch" -eq 1 || "$was_running" -eq 1 ]]; then
-    open "$target_app"
 fi

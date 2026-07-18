@@ -4,7 +4,9 @@ import CmuxCompanionCore
 
 struct CompanionRootView: View {
     @ObservedObject var model: CompanionAppModel
+    @ObservedObject var updater: AppUpdateController
     @State private var showHookConfirmation = false
+    @State private var showUpdateConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -13,6 +15,10 @@ struct CompanionRootView: View {
 
             ScrollView {
                 LazyVStack(spacing: 10) {
+                    if updater.phase != .idle {
+                        updateBanner
+                    }
+
                     if let feedback = model.hookSetupFeedback {
                         hookSetupBanner(feedback)
                     }
@@ -65,6 +71,22 @@ struct CompanionRootView: View {
         } message: {
             Text("cmux hooks setup이 지원 Agent의 사용자 설정을 업데이트합니다.")
         }
+        .confirmationDialog(
+            "v\(updater.updateVersionText ?? "새 버전")로 업데이트할까요?",
+            isPresented: $showUpdateConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("다운로드하고 재실행") {
+                Task { await updater.downloadAndInstall() }
+            }
+            Button("릴리스 노트 열기") { updater.openReleasePage() }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text(
+                "GitHub digest와 SHA-256 파일을 확인한 뒤 현재 앱을 백업하고 교체합니다. "
+                    + "이 빌드는 Developer ID 서명·notarization 전이며 설치는 자동으로 시작되지 않습니다."
+            )
+        }
     }
 
     private var header: some View {
@@ -94,6 +116,14 @@ struct CompanionRootView: View {
             }
             Spacer()
             Button {
+                Task { await updater.checkForUpdates() }
+            } label: {
+                Image(systemName: "arrow.triangle.2.circlepath")
+            }
+            .buttonStyle(.borderless)
+            .disabled(updater.isBusy)
+            .help("업데이트 확인")
+            Button {
                 Task { await model.refresh() }
             } label: {
                 Image(systemName: "arrow.clockwise")
@@ -102,6 +132,92 @@ struct CompanionRootView: View {
             .help("새로고침")
         }
         .padding(12)
+    }
+
+    @ViewBuilder
+    private var updateBanner: some View {
+        let color: Color = {
+            switch updater.phase {
+            case .failed: return .orange
+            case .available: return .blue
+            case .upToDate: return .green
+            default: return .secondary
+            }
+        }()
+
+        HStack(alignment: .top, spacing: 8) {
+            Group {
+                switch updater.phase {
+                case .checking, .downloading, .installing:
+                    ProgressView().controlSize(.small)
+                case .upToDate:
+                    Image(systemName: "checkmark.circle.fill")
+                case .available:
+                    Image(systemName: "arrow.down.circle.fill")
+                case .failed:
+                    Image(systemName: "exclamationmark.triangle.fill")
+                case .idle:
+                    EmptyView()
+                }
+            }
+            .foregroundStyle(color)
+
+            VStack(alignment: .leading, spacing: 4) {
+                switch updater.phase {
+                case .checking:
+                    Text("업데이트 확인 중…").font(.caption.weight(.semibold))
+                case .upToDate:
+                    Text("최신 버전입니다").font(.caption.weight(.semibold))
+                    Text("현재 v\(updater.currentVersionText)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                case .available:
+                    Text("v\(updater.updateVersionText ?? "?") 사용 가능")
+                        .font(.caption.weight(.semibold))
+                    Text("GitHub Release에서 업데이트를 확인했습니다.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                case .downloading:
+                    Text("업데이트 다운로드 및 검증 중…")
+                        .font(.caption.weight(.semibold))
+                case .installing:
+                    Text("앱 교체 후 재실행 중…")
+                        .font(.caption.weight(.semibold))
+                case .failed(let message):
+                    Text("업데이트 실패").font(.caption.weight(.semibold))
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(4)
+                case .idle:
+                    EmptyView()
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if updater.phase == .available {
+                VStack(alignment: .trailing, spacing: 4) {
+                    Button(updater.canInstallInPlace ? "업데이트" : "다운로드") {
+                        if updater.canInstallInPlace {
+                            showUpdateConfirmation = true
+                        } else {
+                            updater.openReleasePage()
+                        }
+                    }
+                    .controlSize(.small)
+                    Button("노트") { updater.openReleasePage() }
+                        .buttonStyle(.plain)
+                        .font(.caption2)
+                }
+            } else if !updater.isBusy {
+                Button { updater.dismissStatus() } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(9)
+        .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -223,6 +339,9 @@ struct CompanionRootView: View {
             }
             .buttonStyle(.borderless)
             .disabled(model.isInstallingHooks)
+            Text("v\(updater.currentVersionText)")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
             Button("종료") { NSApplication.shared.terminate(nil) }
                 .buttonStyle(.borderless)
         }

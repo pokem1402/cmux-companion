@@ -41,7 +41,31 @@ after saving active work so the existing control socket adopts the new mode.
 
 The packaged app and CLI are written to `dist/`. The build script accepts
 `CMUX_COMPANION_SDK=/path/to/MacOSX.sdk` when the selected Command Line Tools
-and default SDK are not compatible.
+and default SDK are not compatible. Packaged builds use the `preview` update
+channel by default; use `CMUX_COMPANION_UPDATE_CHANNEL=stable` to make a build
+ignore GitHub prereleases. The only accepted channel values are `stable` and
+`preview`.
+
+To produce the two assets required by the in-app updater, set the release
+version and monotonically increasing build number, then run:
+
+```bash
+CMUX_COMPANION_VERSION=0.1.2 \
+CMUX_COMPANION_BUILD_NUMBER=3 \
+./scripts/package-release.sh
+```
+
+The helper rebuilds the app, sanitizes metadata, creates the ZIP and SHA-256
+sidecar under `dist/release/`, then extracts and verifies the result. For a tag
+named `v0.1.2`, upload both assets without renaming them:
+
+```text
+CmuxCompanion-v0.1.2-macos-arm64.zip
+CmuxCompanion-v0.1.2-macos-arm64.zip.sha256
+```
+
+These names are exact: the updater ignores a release if either asset is absent
+or renamed.
 
 ## Run
 
@@ -87,6 +111,30 @@ zsh/fish because the public cmux tree does not expose that foreground process.
 Remote hook-owned agents add a `Remote` suffix. If the sessions snapshot is
 temporarily unavailable, Companion retains the last known agent or shows
 `Unknown` instead of incorrectly switching the card to `Shell`.
+
+## Updates
+
+Starting with v0.1.1, Companion checks the GitHub Releases feed no more than
+once every 24 hours and also provides a manual update check in the app. A
+`preview` build considers prereleases as well as regular releases; a `stable`
+build considers only regular releases. Draft releases are never offered.
+
+Before offering an install, Companion downloads the macOS app ZIP and verifies
+its bytes against both GitHub's release-asset digest and the published
+`.sha256` sidecar. Installation always requires explicit user confirmation;
+the app never silently replaces itself. These checks detect download
+corruption and disagreement between release assets, but they do **not** prove
+publisher authenticity if the GitHub repository or account is compromised.
+Preview builds are ad-hoc signed and are not Apple Developer ID signed or
+notarized, so Gatekeeper may still require Finder's **Open** action.
+
+Self-replacement is attempted only when the current app is installed in a
+location writable by the current user, such as `~/Applications`. If the app is
+running from a read-only disk image, an unwritable `/Applications` directory,
+or another location that cannot be safely replaced, Companion falls back to a
+manual download/install flow. The existing v0.1.0 release has no updater, so
+v0.1.1 must be downloaded and installed manually once; in-app checks work for
+subsequent releases.
 
 ## Local agent tracking
 

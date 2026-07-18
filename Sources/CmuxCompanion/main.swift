@@ -8,12 +8,14 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var pet: FloatingPetController!
     private var hud: TopHUDController!
     private var notifications: NotificationCoordinator!
+    private var updater: AppUpdateController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
         model = CompanionAppModel()
-        menuBar = MenuBarController(model: model)
+        updater = AppUpdateController()
+        menuBar = MenuBarController(model: model, updater: updater)
         pet = FloatingPetController()
         hud = TopHUDController()
         notifications = NotificationCoordinator()
@@ -50,10 +52,12 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         pet.setVisible(model.showPet)
         updatePet(sets: model.sets, evaluations: model.evaluations)
         model.start()
+        updater.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         model.stop()
+        updater.stop()
     }
 
     private func updatePet(sets: [WorkSet], evaluations: [UUID: SetEvaluation]) {

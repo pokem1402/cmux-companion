@@ -1103,6 +1103,149 @@ private func testTranscriptExtraction(root: URL) throws {
     try require(claudePrompt?.text == "review the patch", "Claude transcript prompt must extract")
 }
 
+private func testAppReleaseSelectionAndArchivePolicy() throws {
+    guard let current = AppSemanticVersion("0.1.0"),
+          let patchNine = AppSemanticVersion("0.1.9"),
+          let patchTen = AppSemanticVersion("0.1.10"),
+          let alpha = AppSemanticVersion("1.0.0-alpha"),
+          let alphaOne = AppSemanticVersion("1.0.0-alpha.1"),
+          let release = AppSemanticVersion("1.0.0") else {
+        throw SelfTestFailure.assertion("valid semantic versions must parse")
+    }
+    try require(patchNine < patchTen, "semantic comparison must compare numeric components")
+    try require(alpha < alphaOne && alphaOne < release, "prereleases must sort before releases")
+    try require(AppSemanticVersion("01.0.0") == nil, "core versions must reject leading zeroes")
+    try require(AppSemanticVersion("1.0.0-01") == nil, "numeric prereleases must reject leading zeroes")
+
+    func makeRelease(
+        _ version: String,
+        architecture: String = "arm64",
+        draft: Bool = false,
+        prerelease: Bool = false
+    ) -> GitHubAppRelease {
+        let archiveName = "CmuxCompanion-v\(version)-macos-\(architecture).zip"
+        let base = "https://github.com/pokem1402/cmux-companion/releases/download/v\(version)/"
+        return GitHubAppRelease(
+            tagName: "v\(version)",
+            draft: draft,
+            prerelease: prerelease,
+            assets: [
+                GitHubAppReleaseAsset(
+                    name: archiveName,
+                    browserDownloadURL: URL(string: base + archiveName)!
+                ),
+                GitHubAppReleaseAsset(
+                    name: archiveName + ".sha256",
+                    browserDownloadURL: URL(string: base + archiveName + ".sha256")!
+                )
+            ]
+        )
+    }
+
+    let older = makeRelease("0.0.9")
+    let equal = makeRelease("0.1.0")
+    let stable = makeRelease("0.1.1")
+    let preview = makeRelease("0.2.0-beta.1", prerelease: true)
+    let draft = makeRelease("9.0.0", draft: true)
+    let wrongArchitecture = makeRelease("8.0.0", architecture: "x86_64")
+
+    try require(
+        AppReleaseSelector.latest(
+            from: [older, equal],
+            newerThan: current,
+            channel: .preview
+        ) == nil,
+        "older and equal releases must not be offered"
+    )
+    try require(
+        AppReleaseSelector.latest(
+            from: [draft, wrongArchitecture],
+            newerThan: current,
+            channel: .preview
+        ) == nil,
+        "drafts and wrong-architecture assets must not be offered"
+    )
+    try require(
+        AppReleaseSelector.latest(
+            from: [preview, stable, draft, wrongArchitecture],
+            newerThan: current,
+            channel: .stable
+        )?.version == AppSemanticVersion("0.1.1"),
+        "stable channel must ignore prereleases"
+    )
+    try require(
+        AppReleaseSelector.latest(
+            from: [stable, preview],
+            newerThan: current,
+            channel: .preview
+        )?.version == AppSemanticVersion("0.2.0-beta.1"),
+        "preview channel must select the newest eligible prerelease"
+    )
+
+    let digest = String(repeating: "A", count: 64)
+    guard let githubChecksum = AppUpdateChecksum(githubDigest: "sha256:\(digest)"),
+          let sidecarChecksum = AppUpdateChecksum.parseSidecar(
+              "\(digest)  CmuxCompanion-v0.1.1-macos-arm64.zip\n",
+              expectedFilename: "CmuxCompanion-v0.1.1-macos-arm64.zip"
+          ) else {
+        throw SelfTestFailure.assertion("valid GitHub and sidecar checksums must parse")
+    }
+    try require(githubChecksum == sidecarChecksum, "checksum formats must normalize to one digest")
+    try require(
+        AppUpdateChecksum.parseSidecar(
+            "\(digest)  another.zip\n",
+            expectedFilename: "CmuxCompanion-v0.1.1-macos-arm64.zip"
+        ) == nil,
+        "sidecar filename must match the selected archive"
+    )
+
+    let releaseJSON = #"""
+    [{
+      "tag_name":"v0.1.1","name":"Preview","draft":false,"prerelease":false,
+      "published_at":"2026-07-19T01:02:03Z",
+      "html_url":"https://github.com/pokem1402/cmux-companion/releases/tag/v0.1.1",
+      "assets":[{
+        "name":"CmuxCompanion-v0.1.1-macos-arm64.zip",
+        "browser_download_url":"https://github.com/pokem1402/cmux-companion/releases/download/v0.1.1/CmuxCompanion-v0.1.1-macos-arm64.zip",
+        "content_type":"application/zip","size":1234,"digest":"sha256:\#(digest)"
+      }]
+    }]
+    """#
+    let decoded = try JSONDecoder().decode([GitHubAppRelease].self, from: Data(releaseJSON.utf8))
+    try require(decoded.first?.semanticVersion == AppSemanticVersion("0.1.1"), "GitHub tag must decode")
+    try require(decoded.first?.publishedAt != nil, "GitHub ISO-8601 publication date must decode")
+    try require(decoded.first?.assets.first?.size == 1234, "GitHub asset metadata must decode")
+
+    try require(
+        AppUpdateArchivePolicy.isSafeEntryPath("CmuxCompanion.app/Contents/MacOS/CmuxCompanion"),
+        "normal app bundle entry must be safe"
+    )
+    try require(
+        AppUpdateArchivePolicy.isSafeEntryPath("CmuxCompanion.app/Contents/Resources/"),
+        "normal directory entry must be safe"
+    )
+    for unsafePath in [
+        "../escape",
+        "CmuxCompanion.app/../../escape",
+        "/tmp/escape",
+        "C:\\escape",
+        "CmuxCompanion.app//Contents",
+        "CmuxCompanion.app/Contents\nEscape"
+    ] {
+        try require(
+            !AppUpdateArchivePolicy.isSafeEntryPath(unsafePath),
+            "unsafe archive path must be rejected: \(unsafePath)"
+        )
+    }
+    try require(
+        !AppUpdateArchivePolicy.allEntriesAreSafe([
+            "CmuxCompanion.app/Contents/Info.plist",
+            "../escape"
+        ]),
+        "one traversal entry must reject the whole archive listing"
+    )
+}
+
 let temporaryRoot = FileManager.default.temporaryDirectory
     .appendingPathComponent("cmux-companion-selftest-\(UUID().uuidString)", isDirectory: true)
 
@@ -1123,6 +1266,7 @@ do {
     try testExactGroupJoin()
     try testRenameRejectsDuplicateSetName()
     try testTranscriptExtraction(root: temporaryRoot)
+    try testAppReleaseSelectionAndArchivePolicy()
     print("Cmux Companion self-test: PASS")
 } catch {
     fputs("Cmux Companion self-test: FAIL: \(error)\n", stderr)

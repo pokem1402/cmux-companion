@@ -7,15 +7,19 @@ final class MenuBarController {
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private let model: CompanionAppModel
+    private let updater: AppUpdateController
     private var cancellables: Set<AnyCancellable> = []
 
-    init(model: CompanionAppModel) {
+    init(model: CompanionAppModel, updater: AppUpdateController) {
         self.model = model
+        self.updater = updater
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         popover.behavior = .transient
         popover.animates = true
         popover.contentSize = NSSize(width: 430, height: 640)
-        popover.contentViewController = NSHostingController(rootView: CompanionRootView(model: model))
+        popover.contentViewController = NSHostingController(
+            rootView: CompanionRootView(model: model, updater: updater)
+        )
 
         if let button = statusItem.button {
             button.target = self
@@ -25,6 +29,12 @@ final class MenuBarController {
         }
 
         model.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.updateStatusItem() }
+            }
+            .store(in: &cancellables)
+        updater.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 DispatchQueue.main.async { self?.updateStatusItem() }
@@ -59,9 +69,12 @@ final class MenuBarController {
         guard let button = statusItem.button else { return }
         let attention = model.attentionCount
         let active = model.evaluations.values.filter { $0.status == .active }.count
+        let updateAvailable = updater.phase == .available
         let symbol: String
         if attention > 0 {
             symbol = "exclamationmark.bubble.fill"
+        } else if updateAvailable {
+            symbol = "arrow.down.circle.fill"
         } else if active > 0 {
             symbol = "bolt.fill"
         } else if model.isCmuxConnected {
@@ -70,12 +83,20 @@ final class MenuBarController {
             symbol = "terminal"
         }
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Cmux Companion")
-        image?.isTemplate = attention == 0
+        image?.isTemplate = attention == 0 && !updateAvailable
         button.image = image
-        button.title = attention > 0 ? " \(attention)" : ""
-        button.contentTintColor = attention > 0 ? .systemOrange : nil
-        button.toolTip = attention > 0
-            ? "\(attention)개 작업 세트에 확인이 필요합니다"
-            : active > 0 ? "\(active)개 작업 세트 진행 중" : "Cmux Companion"
+        button.title = attention > 0 ? " \(attention)" : updateAvailable ? " ↑" : ""
+        button.contentTintColor = attention > 0
+            ? .systemOrange
+            : updateAvailable ? .systemBlue : nil
+        if attention > 0 {
+            button.toolTip = "\(attention)개 작업 세트에 확인이 필요합니다"
+        } else if updateAvailable {
+            button.toolTip = "Cmux Companion v\(updater.updateVersionText ?? "새 버전") 업데이트 가능"
+        } else if active > 0 {
+            button.toolTip = "\(active)개 작업 세트 진행 중"
+        } else {
+            button.toolTip = "Cmux Companion"
+        }
     }
 }

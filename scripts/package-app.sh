@@ -7,9 +7,10 @@ project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 dist_dir="$project_root/dist"
 app_bundle="$dist_dir/CmuxCompanion.app"
 bundle_id=${CMUX_COMPANION_BUNDLE_ID:-dev.cmuxcompanion.app}
-marketing_version=${CMUX_COMPANION_VERSION:-0.1.0}
-build_version=${CMUX_COMPANION_BUILD_NUMBER:-1}
+marketing_version=${CMUX_COMPANION_VERSION:-0.1.1}
+build_version=${CMUX_COMPANION_BUILD_NUMBER:-2}
 minimum_macos=${CMUX_COMPANION_MIN_MACOS:-14.0}
+update_channel=${CMUX_COMPANION_UPDATE_CHANNEL:-preview}
 
 if [[ ! "$bundle_id" =~ ^[A-Za-z0-9.-]+$ ]]; then
     printf '%s\n' "package-app: invalid bundle identifier: $bundle_id" >&2
@@ -23,6 +24,13 @@ if [[ ! "$build_version" =~ ^[0-9]+$ ]]; then
     printf '%s\n' "package-app: build number must be numeric" >&2
     exit 2
 fi
+case "$update_channel" in
+    stable|preview) ;;
+    *)
+        printf '%s\n' "package-app: update channel must be stable or preview" >&2
+        exit 2
+        ;;
+esac
 
 mkdir -p "$dist_dir" "$project_root/.build/module-cache" \
     "$project_root/.build/swiftpm-cache" \
@@ -84,6 +92,7 @@ install -m 0755 "$bin_path/CmuxCompanion" "$macos_dir/CmuxCompanion"
 install -m 0755 "$bin_path/cmux-set" "$macos_dir/cmux-set"
 install -m 0755 "$script_dir/remote-hook-bridge.sh" "$resources_dir/scripts/remote-hook-bridge.sh"
 install -m 0755 "$script_dir/install-remote-hooks.sh" "$resources_dir/scripts/install-remote-hooks.sh"
+install -m 0755 "$script_dir/install-local.sh" "$resources_dir/scripts/install-local.sh"
 install -m 0644 "$script_dir/shell-command-hook.zsh" "$resources_dir/scripts/shell-command-hook.zsh"
 
 info_plist="$contents/Info.plist"
@@ -97,6 +106,7 @@ plutil -insert CFBundleName -string CmuxCompanion "$info_plist"
 plutil -insert CFBundlePackageType -string APPL "$info_plist"
 plutil -insert CFBundleShortVersionString -string "$marketing_version" "$info_plist"
 plutil -insert CFBundleVersion -string "$build_version" "$info_plist"
+plutil -insert CmuxCompanionUpdateChannel -string "$update_channel" "$info_plist"
 plutil -insert LSMinimumSystemVersion -string "$minimum_macos" "$info_plist"
 plutil -insert LSUIElement -bool true "$info_plist"
 plutil -insert NSHighResolutionCapable -bool true "$info_plist"
