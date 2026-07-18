@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import CmuxCompanionCore
@@ -15,6 +16,7 @@ private enum DragAndDropSelfTestError: Error, CustomStringConvertible {
 enum DragAndDropSelfTest {
     @MainActor
     static func run() async throws {
+        try await verifyMenuBarLayout()
         try verifyColorPalette()
         guard SurfaceDragTransport.selfTest() else {
             throw DragAndDropSelfTestError.assertion("drag transport token round-trip failed")
@@ -249,6 +251,68 @@ enum DragAndDropSelfTest {
               failingModel.lastError?.contains("저장하지 못했습니다") == true else {
             throw DragAndDropSelfTestError.assertion("failed unlink save was not rolled back")
         }
+    }
+
+    @MainActor
+    private static func verifyMenuBarLayout() async throws {
+        guard MenuBarStatusLayout.itemLength == 48,
+              MenuBarStatusLayout.title(attentionCount: 0, updateAvailable: false).isEmpty,
+              MenuBarStatusLayout.title(attentionCount: 1, updateAvailable: false) == " 1",
+              MenuBarStatusLayout.title(attentionCount: 100, updateAvailable: false) == " 99",
+              MenuBarStatusLayout.title(attentionCount: 0, updateAvailable: true) == " ↑" else {
+            throw DragAndDropSelfTestError.assertion("menu bar popover anchor sizing is not stable")
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-companion-menu-layout-selftest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let monitoredSet = WorkSet(
+            label: "Layout",
+            groups: [WorkGroup(label: "Workers", role: .worker, required: true)]
+        )
+        let store = CompanionStore(url: root.appendingPathComponent("sets.json"))
+        try store.save(CompanionSnapshot(sets: [monitoredSet]))
+        let model = CompanionAppModel(
+            store: store,
+            inbox: CommandInbox(directoryURL: root.appendingPathComponent("commands", isDirectory: true))
+        )
+        let controller = MenuBarController(model: model, updater: AppUpdateController())
+
+        guard controller.statusItemLengthForTesting == MenuBarStatusLayout.itemLength,
+              controller.statusItemLengthForTesting != NSStatusItem.variableLength,
+              model.attentionCount == 0 else {
+            throw DragAndDropSelfTestError.assertion("menu bar did not start with a fixed popover anchor")
+        }
+
+        model.arm(monitoredSet.id)
+        try await waitForMenuBarTitle(" 1", in: controller)
+        guard model.attentionCount == 1,
+              controller.statusItemTitleForTesting == " 1",
+              controller.statusItemLengthForTesting == MenuBarStatusLayout.itemLength else {
+            throw DragAndDropSelfTestError.assertion("arming monitoring changed the popover anchor width")
+        }
+
+        model.disarm(monitoredSet.id)
+        try await waitForMenuBarTitle("", in: controller)
+        guard model.attentionCount == 0,
+              controller.statusItemTitleForTesting.isEmpty,
+              controller.statusItemLengthForTesting == MenuBarStatusLayout.itemLength else {
+            throw DragAndDropSelfTestError.assertion("disarming monitoring changed the popover anchor width")
+        }
+    }
+
+    @MainActor
+    private static func waitForMenuBarTitle(
+        _ expectedTitle: String,
+        in controller: MenuBarController
+    ) async throws {
+        for _ in 0..<100 {
+            if controller.statusItemTitleForTesting == expectedTitle { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw DragAndDropSelfTestError.assertion("menu bar status item did not finish updating")
     }
 
     private static func verifyColorPalette() throws {

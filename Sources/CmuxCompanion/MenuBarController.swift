@@ -2,6 +2,20 @@ import AppKit
 import Combine
 import SwiftUI
 
+enum MenuBarStatusLayout {
+    /// A stable popover anchor that still has room for the symbol and a
+    /// two-digit attention count. Variable-length items move the open popover
+    /// whenever monitoring adds or removes the count label.
+    static let itemLength: CGFloat = 48
+
+    static func title(attentionCount: Int, updateAvailable: Bool) -> String {
+        if attentionCount > 0 {
+            return " \(min(attentionCount, 99))"
+        }
+        return updateAvailable ? " ↑" : ""
+    }
+}
+
 @MainActor
 final class MenuBarController {
     private let statusItem: NSStatusItem
@@ -10,10 +24,15 @@ final class MenuBarController {
     private let updater: AppUpdateController
     private var cancellables: Set<AnyCancellable> = []
 
+    /// Kept internal so the app self-test can guard the real AppKit anchor,
+    /// rather than only testing the value supplied by the layout helper.
+    var statusItemLengthForTesting: CGFloat { statusItem.length }
+    var statusItemTitleForTesting: String { statusItem.button?.title ?? "" }
+
     init(model: CompanionAppModel, updater: AppUpdateController) {
         self.model = model
         self.updater = updater
-        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        self.statusItem = NSStatusBar.system.statusItem(withLength: MenuBarStatusLayout.itemLength)
         popover.behavior = .transient
         popover.animates = true
         popover.contentSize = NSSize(width: 430, height: 640)
@@ -85,7 +104,10 @@ final class MenuBarController {
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Cmux Companion")
         image?.isTemplate = attention == 0 && !updateAvailable
         button.image = image
-        button.title = attention > 0 ? " \(attention)" : updateAvailable ? " ↑" : ""
+        button.title = MenuBarStatusLayout.title(
+            attentionCount: attention,
+            updateAvailable: updateAvailable
+        )
         button.contentTintColor = attention > 0
             ? .systemOrange
             : updateAvailable ? .systemBlue : nil
