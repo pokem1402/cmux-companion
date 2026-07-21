@@ -7,8 +7,8 @@ project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 dist_dir="$project_root/dist"
 app_bundle="$dist_dir/CmuxCompanion.app"
 bundle_id=${CMUX_COMPANION_BUNDLE_ID:-dev.cmuxcompanion.app}
-marketing_version=${CMUX_COMPANION_VERSION:-0.1.8}
-build_version=${CMUX_COMPANION_BUILD_NUMBER:-9}
+marketing_version=${CMUX_COMPANION_VERSION:-0.1.9}
+build_version=${CMUX_COMPANION_BUILD_NUMBER:-10}
 minimum_macos=${CMUX_COMPANION_MIN_MACOS:-14.0}
 update_channel=${CMUX_COMPANION_UPDATE_CHANNEL:-preview}
 
@@ -110,7 +110,7 @@ plutil -insert CmuxCompanionUpdateChannel -string "$update_channel" "$info_plist
 plutil -insert LSMinimumSystemVersion -string "$minimum_macos" "$info_plist"
 plutil -insert LSUIElement -bool true "$info_plist"
 plutil -insert NSHighResolutionCapable -bool true "$info_plist"
-plutil -insert UTExportedTypeDeclarations -json '[{"UTTypeConformsTo":["public.data"],"UTTypeDescription":"Cmux Companion drag token","UTTypeIdentifier":"dev.cmuxcompanion.surface-drag-token"}]' "$info_plist"
+plutil -insert UTExportedTypeDeclarations -json '[{"UTTypeConformsTo":["public.data"],"UTTypeDescription":"Cmux Companion surface drag token","UTTypeIdentifier":"dev.cmuxcompanion.surface-drag-token"},{"UTTypeConformsTo":["public.data"],"UTTypeDescription":"Cmux Companion set order drag token","UTTypeIdentifier":"dev.cmuxcompanion.set-order-drag-token"}]' "$info_plist"
 
 # A locally built bundle can inherit Finder/iCloud quarantine from the project
 # directory itself. That makes Gatekeeper present an "Apple cannot check it"

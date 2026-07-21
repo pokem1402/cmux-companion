@@ -395,14 +395,15 @@ private struct DashboardSetSidebar: View {
 
                     ForEach(sets) { set in
                         let evaluation = model.evaluations[set.id] ?? SetEvaluator.evaluate(set)
-                        Button { onSelectSet(set.id) } label: {
-                            DashboardSetNavigationRow(
-                                set: set,
-                                evaluation: evaluation,
-                                selected: selectedSetID == set.id
-                            )
-                        }
-                        .buttonStyle(.plain)
+                        DashboardSetSidebarItem(
+                            model: model,
+                            set: set,
+                            evaluation: evaluation,
+                            selected: selectedSetID == set.id,
+                            reorderingEnabled: !searchIsActive,
+                            forceExpanded: searchIsActive && matchingSetIDs.contains(set.id),
+                            onSelect: { onSelectSet(set.id) }
+                        )
                         .opacity(searchIsActive && !matchingSetIDs.contains(set.id) ? 0.52 : 1)
                     }
                 }
@@ -434,10 +435,99 @@ private struct DashboardSetSidebar: View {
     }
 }
 
+private struct DashboardSetSidebarItem: View {
+    @ObservedObject var model: CompanionAppModel
+    let set: WorkSet
+    let evaluation: SetEvaluation
+    let selected: Bool
+    let reorderingEnabled: Bool
+    let forceExpanded: Bool
+    let onSelect: () -> Void
+    @State private var isOrderDropTargeted = false
+
+    private var targetedBinding: Binding<Bool> {
+        Binding(
+            get: { reorderingEnabled && isOrderDropTargeted },
+            set: { isOrderDropTargeted = reorderingEnabled && $0 }
+        )
+    }
+
+    private var orderDropEdge: VerticalEdge? {
+        guard let sourceSetID = SetOrderDragTransport.currentPayload?.setID,
+              sourceSetID != set.id,
+              let sourceIndex = model.sets.firstIndex(where: { $0.id == sourceSetID }),
+              let targetIndex = model.sets.firstIndex(where: { $0.id == set.id }) else { return nil }
+        return sourceIndex < targetIndex ? .bottom : .top
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Button(action: onSelect) {
+                DashboardSetNavigationRow(
+                    set: set,
+                    evaluation: evaluation,
+                    selected: selected,
+                    collapsed: !forceExpanded && model.isSetCollapsed(set.id)
+                )
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            SetOrderDragHandle(
+                set: set,
+                isEnabled: reorderingEnabled,
+                disabledHelp: "검색을 지우면 세트 순서를 변경할 수 있습니다"
+            )
+        }
+        .padding(.trailing, 3)
+        .background(
+            isOrderDropTargeted && reorderingEnabled
+                ? Color.accentColor.opacity(0.11)
+                : Color.clear,
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        .overlay(alignment: orderDropEdge == .bottom ? .bottom : .top) {
+            if isOrderDropTargeted && reorderingEnabled, orderDropEdge != nil {
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(height: 3)
+                    .padding(.horizontal, 3)
+                    .offset(y: orderDropEdge == .bottom ? 2 : -2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(
+            of: [SetOrderDragTransport.contentType],
+            isTargeted: targetedBinding
+        ) { providers in
+            guard reorderingEnabled else { return false }
+            return SetOrderDragTransport.receiveOne(from: providers) { payload in
+                _ = model.moveSet(payload.setID, relativeTo: set.id)
+            }
+        }
+        .contextMenu {
+            Button(
+                forceExpanded
+                    ? "검색 중 임시 펼쳐짐"
+                    : (model.isSetCollapsed(set.id) ? "세트 펼치기" : "세트 최소화")
+            ) {
+                model.toggleSetCollapsed(set.id)
+            }
+            .disabled(forceExpanded)
+            Divider()
+            Button("한 칸 위로") { _ = model.moveSet(set.id, by: -1) }
+                .disabled(!reorderingEnabled || !model.canMoveSet(set.id, by: -1))
+            Button("한 칸 아래로") { _ = model.moveSet(set.id, by: 1) }
+                .disabled(!reorderingEnabled || !model.canMoveSet(set.id, by: 1))
+        }
+    }
+}
+
 private struct DashboardSetNavigationRow: View {
     let set: WorkSet
     let evaluation: SetEvaluation
     let selected: Bool
+    let collapsed: Bool
 
     var body: some View {
         HStack(spacing: 9) {
@@ -453,6 +543,12 @@ private struct DashboardSetNavigationRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
+            if collapsed {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .help("최소화됨")
+            }
             Image(systemName: set.isCurrentGenerationCompleted ? "checkmark.circle.fill" : evaluation.status.symbolName)
                 .foregroundStyle(set.isCurrentGenerationCompleted ? Color.blue : evaluation.status.color)
                 .help(set.isCurrentGenerationCompleted ? "완료" : evaluation.status.displayName)
@@ -523,7 +619,8 @@ private struct DashboardSetBoard: View {
                                 set: set,
                                 evaluation: model.evaluations[set.id] ?? SetEvaluator.evaluate(set),
                                 forceExpanded: searchResults.isActive
-                                    && searchResults.matchingSetIDs.contains(set.id)
+                                    && searchResults.matchingSetIDs.contains(set.id),
+                                allowsReordering: !searchResults.isActive
                             )
                             .id(set.id)
                             .overlay {

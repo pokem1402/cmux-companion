@@ -25,12 +25,21 @@ enum DragAndDropSelfTest {
         guard SurfaceDragTransport.selfTest() else {
             throw DragAndDropSelfTestError.assertion("drag transport token round-trip failed")
         }
+        guard SetOrderDragTransport.selfTest(),
+              SetOrderDragTransport.contentType.identifier
+                != SurfaceDragTransport.contentType.identifier else {
+            throw DragAndDropSelfTestError.assertion(
+                "set-order drag transport round-trip or private type separation failed"
+            )
+        }
         try await verifyItemProviderRoundTrip()
 
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("cmux-companion-dnd-selftest-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+
+        try verifySetPreferencesAndOrdering(root: root)
 
         let member = WorkMember(
             label: "main",
@@ -257,9 +266,27 @@ enum DragAndDropSelfTest {
         let failingStoreURL = root.appendingPathComponent("failing-sets.json")
         let failingStore = CompanionStore(url: failingStoreURL)
         try failingStore.save(CompanionSnapshot(sets: [sourceSet, destinationSet]))
+        let failingPreferencesName = "dev.cmuxcompanion.selftest.failing-store.\(UUID().uuidString)"
+        guard let failingPreferences = UserDefaults(suiteName: failingPreferencesName) else {
+            throw DragAndDropSelfTestError.assertion(
+                "could not create isolated failing-store preferences"
+            )
+        }
+        failingPreferences.removePersistentDomain(forName: failingPreferencesName)
+        defer { failingPreferences.removePersistentDomain(forName: failingPreferencesName) }
         let failingModel = CompanionAppModel(
             store: failingStore,
-            inbox: CommandInbox(directoryURL: root.appendingPathComponent("failing-commands"))
+            inbox: CommandInbox(directoryURL: root.appendingPathComponent("failing-commands")),
+            preferences: failingPreferences
+        )
+        guard failingModel.setSetCollapsed(sourceSet.id, collapsed: true),
+              failingModel.isSetCollapsed(sourceSet.id) else {
+            throw DragAndDropSelfTestError.assertion(
+                "could not prepare a collapsed set for failing-store deletion"
+            )
+        }
+        let unchangedCollapsedPreferences = failingPreferences.stringArray(
+            forKey: "collapsedWorkSetIDs"
         )
         try FileManager.default.removeItem(at: failingStoreURL)
         try FileManager.default.createDirectory(
@@ -267,6 +294,17 @@ enum DragAndDropSelfTest {
             withIntermediateDirectories: false
         )
         let unchangedSets = failingModel.sets
+
+        failingModel.deleteSet(sourceSet.id)
+        guard failingModel.sets == unchangedSets,
+              failingModel.isSetCollapsed(sourceSet.id),
+              failingPreferences.stringArray(forKey: "collapsedWorkSetIDs")
+                == unchangedCollapsedPreferences,
+              failingModel.lastError?.contains("세트를 삭제하지 못했습니다") == true else {
+            throw DragAndDropSelfTestError.assertion(
+                "failed set deletion changed sets or collapsed preferences"
+            )
+        }
 
         guard !failingModel.createSet(named: "Must not appear"),
               failingModel.sets == unchangedSets,
@@ -301,6 +339,283 @@ enum DragAndDropSelfTest {
               failingModel.sets == unchangedSets,
               failingModel.lastError?.contains("저장하지 못했습니다") == true else {
             throw DragAndDropSelfTestError.assertion("failed unlink save was not rolled back")
+        }
+
+        guard !failingModel.moveSet(sourceSet.id, relativeTo: destinationSet.id),
+              failingModel.sets == unchangedSets,
+              failingModel.lastError?.contains("세트 순서를 변경하지 못했습니다") == true else {
+            throw DragAndDropSelfTestError.assertion(
+                "failed relative set reorder was not rolled back atomically"
+            )
+        }
+        guard !failingModel.moveSet(sourceSet.id, by: 1),
+              failingModel.sets == unchangedSets,
+              failingModel.lastError?.contains("세트 순서를 변경하지 못했습니다") == true else {
+            throw DragAndDropSelfTestError.assertion(
+                "failed adjacent set reorder was not rolled back atomically"
+            )
+        }
+    }
+
+    @MainActor
+    private static func verifySetPreferencesAndOrdering(root: URL) throws {
+        let suiteName = "dev.cmuxcompanion.selftest.set-presentation.\(UUID().uuidString)"
+        guard let preferences = UserDefaults(suiteName: suiteName) else {
+            throw DragAndDropSelfTestError.assertion(
+                "could not create isolated set-presentation preferences"
+            )
+        }
+        preferences.removePersistentDomain(forName: suiteName)
+        defer { preferences.removePersistentDomain(forName: suiteName) }
+
+        let first = WorkSet(label: "A", color: "#FF3B30")
+        let second = WorkSet(label: "B", color: "#34C759")
+        let third = WorkSet(label: "C", color: "#0A84FF")
+        let canonicalSets = [first, second, third]
+        let storeURL = root.appendingPathComponent("set-presentation-sets.json")
+        let store = CompanionStore(url: storeURL)
+        try store.save(CompanionSnapshot(sets: canonicalSets))
+        let workSetDataBeforeCollapse = try Data(contentsOf: storeURL)
+
+        let model = CompanionAppModel(
+            store: store,
+            inbox: CommandInbox(
+                directoryURL: root.appendingPathComponent(
+                    "set-presentation-commands",
+                    isDirectory: true
+                )
+            ),
+            preferences: preferences
+        )
+        guard !model.isSetCollapsed(first.id),
+              !model.isSetCollapsed(second.id),
+              model.setSetCollapsed(first.id, collapsed: true),
+              model.setSetCollapsed(second.id, collapsed: true),
+              model.isSetCollapsed(first.id),
+              model.isSetCollapsed(second.id),
+              !model.setSetCollapsed(UUID(), collapsed: true),
+              try Data(contentsOf: storeURL) == workSetDataBeforeCollapse else {
+            throw DragAndDropSelfTestError.assertion(
+                "set collapse preferences were not shared or changed sets.json"
+            )
+        }
+
+        let collapsedPreferencesBeforeReadOnlyLaunch = preferences.stringArray(
+            forKey: "collapsedWorkSetIDs"
+        )
+        let unreadableStoreURL = root.appendingPathComponent("unreadable-presentation-sets.json")
+        try Data(#"{"schemaVersion":99,"sets":[]}"#.utf8).write(to: unreadableStoreURL)
+        let readOnlyModel = CompanionAppModel(
+            store: CompanionStore(url: unreadableStoreURL),
+            inbox: CommandInbox(
+                directoryURL: root.appendingPathComponent(
+                    "read-only-set-presentation-commands",
+                    isDirectory: true
+                )
+            ),
+            preferences: preferences
+        )
+        guard readOnlyModel.sets.isEmpty,
+              readOnlyModel.lastError?.contains("읽지 못해") == true,
+              readOnlyModel.isSetCollapsed(first.id),
+              readOnlyModel.isSetCollapsed(second.id),
+              preferences.stringArray(forKey: "collapsedWorkSetIDs")
+                == collapsedPreferencesBeforeReadOnlyLaunch else {
+            throw DragAndDropSelfTestError.assertion(
+                "read-only store recovery erased collapsed set preferences"
+            )
+        }
+
+        guard let restoredPreferences = UserDefaults(suiteName: suiteName) else {
+            throw DragAndDropSelfTestError.assertion(
+                "could not reopen isolated set-presentation preferences"
+            )
+        }
+        let restoredModel = CompanionAppModel(
+            store: store,
+            inbox: CommandInbox(
+                directoryURL: root.appendingPathComponent(
+                    "restored-set-presentation-commands",
+                    isDirectory: true
+                )
+            ),
+            preferences: restoredPreferences
+        )
+        guard restoredModel.isSetCollapsed(first.id),
+              restoredModel.isSetCollapsed(second.id),
+              !restoredModel.isSetCollapsed(third.id) else {
+            throw DragAndDropSelfTestError.assertion(
+                "set collapse preferences did not survive model recreation"
+            )
+        }
+
+        restoredModel.deleteSet(first.id)
+        guard !restoredModel.isSetCollapsed(first.id),
+              restoredModel.isSetCollapsed(second.id) else {
+            throw DragAndDropSelfTestError.assertion(
+                "deleting a set did not remove only its collapsed preference"
+            )
+        }
+
+        // Reintroducing the exact UUID exposes a stale preference that a
+        // simple `sets.contains` guard could otherwise hide after deletion.
+        try store.save(CompanionSnapshot(sets: canonicalSets))
+        guard let cleanedPreferences = UserDefaults(suiteName: suiteName) else {
+            throw DragAndDropSelfTestError.assertion(
+                "could not verify cleaned set-presentation preferences"
+            )
+        }
+        let orderingModel = CompanionAppModel(
+            store: store,
+            inbox: CommandInbox(
+                directoryURL: root.appendingPathComponent(
+                    "set-ordering-commands",
+                    isDirectory: true
+                )
+            ),
+            preferences: cleanedPreferences
+        )
+        guard !orderingModel.isSetCollapsed(first.id),
+              orderingModel.isSetCollapsed(second.id) else {
+            throw DragAndDropSelfTestError.assertion(
+                "a deleted set ID left a stale collapsed preference"
+            )
+        }
+
+        func IDs(_ sets: [WorkSet]) -> [UUID] { sets.map(\.id) }
+        func requireOrder(
+            _ expected: [WorkSet],
+            _ message: String
+        ) throws {
+            let expectedIDs = IDs(expected)
+            guard IDs(orderingModel.sets) == expectedIDs,
+                  IDs(try store.load().sets) == expectedIDs else {
+                throw DragAndDropSelfTestError.assertion(message)
+            }
+        }
+
+        guard orderingModel.moveSet(first.id, relativeTo: third.id) else {
+            throw DragAndDropSelfTestError.assertion(
+                "a forward relative set reorder was rejected"
+            )
+        }
+        try requireOrder(
+            [second, third, first],
+            "a forward relative set reorder used the wrong insertion side or was not persisted"
+        )
+
+        guard orderingModel.moveSet(first.id, relativeTo: second.id) else {
+            throw DragAndDropSelfTestError.assertion(
+                "a backward relative set reorder was rejected"
+            )
+        }
+        try requireOrder(
+            canonicalSets,
+            "a backward relative set reorder used the wrong insertion side or was not persisted"
+        )
+
+        guard orderingModel.moveSet(second.id, by: 1) else {
+            throw DragAndDropSelfTestError.assertion(
+                "a downward adjacent set reorder was rejected"
+            )
+        }
+        try requireOrder(
+            [first, third, second],
+            "a downward adjacent set reorder was not persisted"
+        )
+        guard orderingModel.moveSet(second.id, by: -1) else {
+            throw DragAndDropSelfTestError.assertion(
+                "an upward adjacent set reorder was rejected"
+            )
+        }
+        try requireOrder(
+            canonicalSets,
+            "an upward adjacent set reorder was not persisted"
+        )
+
+        let stableSets = orderingModel.sets
+        let stableData = try Data(contentsOf: storeURL)
+        let unknownID = UUID()
+        guard orderingModel.moveSet(second.id, relativeTo: second.id),
+              !orderingModel.moveSet(unknownID, relativeTo: first.id),
+              !orderingModel.moveSet(first.id, relativeTo: unknownID),
+              !orderingModel.moveSet(first.id, by: -1),
+              !orderingModel.moveSet(third.id, by: 1),
+              orderingModel.sets == stableSets,
+              try Data(contentsOf: storeURL) == stableData else {
+            throw DragAndDropSelfTestError.assertion(
+                "self, invalid, or boundary set reorder changed canonical order"
+            )
+        }
+        guard orderingModel.lastError?.hasPrefix(
+            "세트 순서를 변경하지 못했습니다:"
+        ) == true,
+              orderingModel.moveSet(first.id, relativeTo: third.id),
+              orderingModel.lastError == nil,
+              orderingModel.moveSet(first.id, relativeTo: second.id),
+              orderingModel.lastError == nil else {
+            throw DragAndDropSelfTestError.assertion(
+                "a successful set reorder did not clear its previous validation error"
+            )
+        }
+        try requireOrder(
+            canonicalSets,
+            "clearing a set-order validation error changed the restored order"
+        )
+
+        let unrelatedConnectionFailure = CmuxSnapshotFailure(
+            command: ["cmux", "tree"],
+            error: NSError(
+                domain: "CmuxCompanionSelfTest",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "unrelated synthetic connection failure"]
+            )
+        )
+        orderingModel.applySnapshotForSelfTest(CmuxTransportSnapshot(
+            tree: .failure(unrelatedConnectionFailure),
+            sessions: .success(CmuxSessionsSnapshot(raw: try CmuxJSON.decode(#"{"sessions":[]}"#))),
+            top: .success(CmuxTopSnapshot()),
+            feed: .success(CmuxFeedSnapshot(raw: try CmuxJSON.decode(#"{"items":[]}"#))),
+            notifications: .success(
+                CmuxNotificationsSnapshot(raw: try CmuxJSON.decode(#"{"notifications":[]}"#))
+            )
+        ))
+        let unrelatedConnectionError = orderingModel.lastError
+        guard unrelatedConnectionError != nil,
+              orderingModel.moveSet(first.id, relativeTo: third.id),
+              orderingModel.lastError == unrelatedConnectionError,
+              orderingModel.moveSet(first.id, relativeTo: second.id),
+              orderingModel.lastError == unrelatedConnectionError else {
+            throw DragAndDropSelfTestError.assertion(
+                "a successful set reorder cleared an unrelated cmux error"
+            )
+        }
+        try requireOrder(
+            canonicalSets,
+            "preserving an unrelated cmux error changed the restored set order"
+        )
+
+        guard let relaunchedPreferences = UserDefaults(suiteName: suiteName) else {
+            throw DragAndDropSelfTestError.assertion(
+                "could not reopen preferences for the reordered model"
+            )
+        }
+        let relaunchedModel = CompanionAppModel(
+            store: store,
+            inbox: CommandInbox(
+                directoryURL: root.appendingPathComponent(
+                    "relaunched-set-ordering-commands",
+                    isDirectory: true
+                )
+            ),
+            preferences: relaunchedPreferences
+        )
+        guard IDs(relaunchedModel.sets) == IDs(canonicalSets),
+              relaunchedModel.isSetCollapsed(second.id),
+              !relaunchedModel.isSetCollapsed(first.id) else {
+            throw DragAndDropSelfTestError.assertion(
+                "set order or collapse preferences did not survive model recreation"
+            )
         }
     }
 

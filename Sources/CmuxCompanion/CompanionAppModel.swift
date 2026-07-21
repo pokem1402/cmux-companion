@@ -56,12 +56,13 @@ final class CompanionAppModel: ObservableObject {
     @Published private(set) var conflictingSetName: String?
     @Published private(set) var hookSetupFeedback: HookSetupFeedback?
     @Published private(set) var isInstallingHooks = false
+    @Published private(set) var collapsedSetIDs: Set<UUID> = []
     @Published var newSetName = ""
     @Published var showPet: Bool {
-        didSet { UserDefaults.standard.set(showPet, forKey: Self.showPetKey) }
+        didSet { preferences.set(showPet, forKey: Self.showPetKey) }
     }
     @Published var showPromptPreview: Bool {
-        didSet { UserDefaults.standard.set(showPromptPreview, forKey: Self.showPromptPreviewKey) }
+        didSet { preferences.set(showPromptPreview, forKey: Self.showPromptPreviewKey) }
     }
 
     var onEvaluationsChanged: (([WorkSet], [UUID: SetEvaluation]) -> Void)?
@@ -70,8 +71,11 @@ final class CompanionAppModel: ObservableObject {
 
     private static let showPetKey = "showFloatingPet"
     private static let showPromptPreviewKey = "showPromptPreview"
+    private static let collapsedSetIDsKey = "collapsedWorkSetIDs"
+    private static let setOrderErrorPrefix = "세트 순서를 변경하지 못했습니다"
     private let store: CompanionStore
     private let inbox: CommandInbox
+    private let preferences: UserDefaults
     private let remoteCacheURL: URL
     private var loader: CmuxSnapshotLoader?
     private var commandClient: CmuxCommandClient?
@@ -100,17 +104,19 @@ final class CompanionAppModel: ObservableObject {
 
     init(
         store: CompanionStore = CompanionStore(),
-        inbox: CommandInbox = CommandInbox()
+        inbox: CommandInbox = CommandInbox(),
+        preferences: UserDefaults = .standard
     ) {
         self.store = store
         self.inbox = inbox
+        self.preferences = preferences
         let remoteCacheFilename = store.url.lastPathComponent == "sets.json"
             ? "remote-events.json"
             : "\(store.url.deletingPathExtension().lastPathComponent).remote-events.json"
         self.remoteCacheURL = store.url.deletingLastPathComponent()
             .appendingPathComponent(remoteCacheFilename)
-        self.showPet = UserDefaults.standard.object(forKey: Self.showPetKey) as? Bool ?? true
-        self.showPromptPreview = UserDefaults.standard.object(forKey: Self.showPromptPreviewKey) as? Bool ?? true
+        self.showPet = preferences.object(forKey: Self.showPetKey) as? Bool ?? true
+        self.showPromptPreview = preferences.object(forKey: Self.showPromptPreviewKey) as? Bool ?? true
 
         lastEventByRemoteSession = RemoteEventCacheStore.load(from: remoteCacheURL)
         lastPersistedRemoteCacheData = try? RemoteEventCacheStore.encodedData(
@@ -123,6 +129,21 @@ final class CompanionAppModel: ObservableObject {
             let message = "저장된 세트를 읽지 못해 원본 보호를 위한 읽기 전용 모드로 시작했습니다. \(store.url.path)을 복구한 뒤 앱을 재시작하세요: \(error.localizedDescription)"
             storeLoadFailureMessage = message
             lastError = message
+        }
+
+        let persistedCollapsedSetIDs = Set(
+            (preferences.stringArray(forKey: Self.collapsedSetIDsKey) ?? [])
+                .compactMap(UUID.init(uuidString:))
+        )
+        if storeLoadFailureMessage == nil {
+            collapsedSetIDs = persistedCollapsedSetIDs.intersection(sets.map(\.id))
+            if collapsedSetIDs != persistedCollapsedSetIDs {
+                persistCollapsedSetIDs()
+            }
+        } else {
+            // Read-only recovery mode must not erase presentation preferences
+            // merely because the protected sets file could not be decoded.
+            collapsedSetIDs = persistedCollapsedSetIDs
         }
 
         do {
@@ -230,8 +251,17 @@ final class CompanionAppModel: ObservableObject {
 
     func deleteSet(_ setID: UUID) {
         guard ensureStoreWritable() else { return }
-        sets.removeAll { $0.id == setID }
-        persistAndEvaluate()
+        var proposedSets = sets
+        proposedSets.removeAll { $0.id == setID }
+        guard proposedSets.count != sets.count,
+              commitPersistedSets(
+                  proposedSets,
+                  failurePrefix: "세트를 삭제하지 못했습니다",
+                  preserveUnrelatedErrorOnSuccess: true
+              ) else { return }
+        if collapsedSetIDs.remove(setID) != nil {
+            persistCollapsedSetIDs()
+        }
     }
 
     @discardableResult
@@ -266,6 +296,91 @@ final class CompanionAppModel: ObservableObject {
         guard let index = sets.firstIndex(where: { $0.id == setID }) else { return }
         sets[index].color = color
         persistAndEvaluate()
+    }
+
+    func isSetCollapsed(_ setID: UUID) -> Bool {
+        collapsedSetIDs.contains(setID)
+    }
+
+    /// Collapse is a shared UI preference rather than work-set domain data.
+    /// Keeping it in UserDefaults makes the popover and Dashboard agree
+    /// immediately without changing the sets.json schema used by cmux-set.
+    @discardableResult
+    func setSetCollapsed(_ setID: UUID, collapsed: Bool) -> Bool {
+        guard sets.contains(where: { $0.id == setID }) else { return false }
+        let changed: Bool
+        if collapsed {
+            changed = collapsedSetIDs.insert(setID).inserted
+        } else {
+            changed = collapsedSetIDs.remove(setID) != nil
+        }
+        if changed {
+            persistCollapsedSetIDs()
+        }
+        return true
+    }
+
+    func toggleSetCollapsed(_ setID: UUID) {
+        _ = setSetCollapsed(setID, collapsed: !isSetCollapsed(setID))
+    }
+
+    func canMoveSet(_ setID: UUID, by offset: Int) -> Bool {
+        guard offset != 0,
+              let index = sets.firstIndex(where: { $0.id == setID }) else { return false }
+        return sets.indices.contains(index + offset)
+    }
+
+    /// Moves a set one or more canonical positions. The visible search order
+    /// is deliberately ignored; callers disable ordering while search is
+    /// active so the persisted result always matches what the user sees.
+    @discardableResult
+    func moveSet(_ setID: UUID, by offset: Int) -> Bool {
+        guard ensureStoreWritable() else { return false }
+        guard offset != 0,
+              let sourceIndex = sets.firstIndex(where: { $0.id == setID }),
+              sets.indices.contains(sourceIndex + offset) else { return false }
+
+        var proposedSets = sets
+        let moved = proposedSets.remove(at: sourceIndex)
+        proposedSets.insert(moved, at: sourceIndex + offset)
+        return commitPersistedSets(
+            proposedSets,
+            failurePrefix: Self.setOrderErrorPrefix,
+            preserveUnrelatedErrorOnSuccess: true,
+            notifyTransitions: false
+        )
+    }
+
+    /// Dropping downward places the source after the target; dropping upward
+    /// places it before the target. This makes every card, including the first
+    /// and last, a useful destination without exposing array indices to views.
+    @discardableResult
+    func moveSet(_ sourceSetID: UUID, relativeTo targetSetID: UUID) -> Bool {
+        guard ensureStoreWritable() else { return false }
+        guard let sourceIndex = sets.firstIndex(where: { $0.id == sourceSetID }),
+              let targetIndex = sets.firstIndex(where: { $0.id == targetSetID }) else {
+            lastError = storeLoadFailureMessage
+                ?? "\(Self.setOrderErrorPrefix): 순서를 바꿀 세트를 찾지 못했습니다."
+            return false
+        }
+        guard sourceIndex != targetIndex else { return true }
+
+        let movingForward = sourceIndex < targetIndex
+        var proposedSets = sets
+        let moved = proposedSets.remove(at: sourceIndex)
+        guard let adjustedTargetIndex = proposedSets.firstIndex(where: { $0.id == targetSetID }) else {
+            lastError = storeLoadFailureMessage
+                ?? "\(Self.setOrderErrorPrefix): 대상 세트가 변경되었습니다."
+            return false
+        }
+        let insertionIndex = movingForward ? adjustedTargetIndex + 1 : adjustedTargetIndex
+        proposedSets.insert(moved, at: insertionIndex)
+        return commitPersistedSets(
+            proposedSets,
+            failurePrefix: Self.setOrderErrorPrefix,
+            preserveUnrelatedErrorOnSuccess: true,
+            notifyTransitions: false
+        )
     }
 
     func add(surface: LiveSurface, to setID: UUID, role: MemberRole, required: Bool? = nil) {
@@ -728,6 +843,13 @@ final class CompanionAppModel: ObservableObject {
         guard let storeLoadFailureMessage else { return true }
         lastError = storeLoadFailureMessage
         return false
+    }
+
+    private func persistCollapsedSetIDs() {
+        preferences.set(
+            collapsedSetIDs.map(\.uuidString).sorted(),
+            forKey: Self.collapsedSetIDsKey
+        )
     }
 
     func petVisibilityDidChange() {
@@ -1706,7 +1828,8 @@ final class CompanionAppModel: ObservableObject {
     private func commitPersistedSets(
         _ proposedSets: [WorkSet],
         failurePrefix: String,
-        preserveUnrelatedErrorOnSuccess: Bool = false
+        preserveUnrelatedErrorOnSuccess: Bool = false,
+        notifyTransitions: Bool = true
     ) -> Bool {
         if let storeLoadFailureMessage {
             lastError = storeLoadFailureMessage
@@ -1727,7 +1850,7 @@ final class CompanionAppModel: ObservableObject {
         } else {
             lastError = nil
         }
-        recalculateEvaluations(notifyTransitions: true)
+        recalculateEvaluations(notifyTransitions: notifyTransitions)
         return true
     }
 

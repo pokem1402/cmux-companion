@@ -51,18 +51,18 @@ To produce the two assets required by the in-app updater, set the release
 version and monotonically increasing build number, then run:
 
 ```bash
-CMUX_COMPANION_VERSION=0.1.8 \
-CMUX_COMPANION_BUILD_NUMBER=9 \
+CMUX_COMPANION_VERSION=0.1.9 \
+CMUX_COMPANION_BUILD_NUMBER=10 \
 ./scripts/package-release.sh
 ```
 
 The helper rebuilds the app, sanitizes metadata, creates the ZIP and SHA-256
 sidecar under `dist/release/`, then extracts and verifies the result. For a tag
-named `v0.1.8`, upload both assets without renaming them:
+named `v0.1.9`, upload both assets without renaming them:
 
 ```text
-CmuxCompanion-v0.1.8-macos-arm64.zip
-CmuxCompanion-v0.1.8-macos-arm64.zip.sha256
+CmuxCompanion-v0.1.9-macos-arm64.zip
+CmuxCompanion-v0.1.9-macos-arm64.zip.sha256
 ```
 
 These names are exact: the updater ignores a release if either asset is absent
@@ -120,6 +120,15 @@ window is resizable and supports full screen; size and position are restored
 after relaunch and clamped to a connected display. While it is open Companion
 temporarily appears in the Dock. Closing it returns the app to menu-bar-only
 mode without stopping monitoring, notifications, the pet, or the HUD.
+
+Each set card can be minimized to its header from either surface. The collapsed
+state is shared by the popover and Dashboard and restored after relaunch;
+search matches expand temporarily without overwriting that preference. Drag the
+`≡` handle in a set header onto another set to reorder the canonical set list,
+or use `한 칸 위로` / `한 칸 아래로` in the set menu. The order is written
+atomically to `sets.json` and immediately updates the Dashboard sidebar as well
+as both card boards. Reordering is disabled while search is applying its
+temporary matches-first display order.
 
 The gear menu provides compact/default/large presets plus width and height
 sliders. The chosen popover size is restored after relaunch and clamped to the

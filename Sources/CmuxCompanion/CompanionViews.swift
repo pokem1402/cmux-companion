@@ -53,7 +53,8 @@ struct CompanionRootView: View {
                                 set: set,
                                 evaluation: model.evaluations[set.id] ?? SetEvaluator.evaluate(set),
                                 forceExpanded: searchResults.isActive
-                                    && searchResults.matchingSetIDs.contains(set.id)
+                                    && searchResults.matchingSetIDs.contains(set.id),
+                                allowsReordering: !searchResults.isActive
                             )
                             .opacity(
                                 searchResults.isActive
@@ -549,12 +550,16 @@ struct SetCardView: View {
     let set: WorkSet
     let evaluation: SetEvaluation
     var forceExpanded = false
-    @State private var isExpanded = true
+    var allowsReordering = true
     @State private var isRenaming = false
     @State private var editedName = ""
     @State private var showAddLink = false
     @State private var showColorPicker = false
     @State private var presentedSetNameConflict: String?
+    @State private var isOrderDropTargeted = false
+    @State private var isSurfaceDragHovering = false
+    @State private var isSurfaceDropTargeted = false
+    @State private var surfaceDropReleaseTask: Task<Void, Never>?
     @State private var linkLabel = "PR 페이지"
     @State private var linkURL = ""
 
@@ -564,14 +569,47 @@ struct SetCardView: View {
         return evaluation.status.displayName
     }
 
-    private var isEffectivelyExpanded: Bool { forceExpanded || isExpanded }
+    private var isStoredCollapsed: Bool { model.isSetCollapsed(set.id) }
+    private var isEffectivelyExpanded: Bool { forceExpanded || !isStoredCollapsed }
+    private var showsRoleDropStrip: Bool { isEffectivelyExpanded || isSurfaceDropTargeted }
+
+    private var surfaceDropTargetBinding: Binding<Bool> {
+        Binding(
+            get: { isSurfaceDragHovering },
+            set: { targeted in
+                isSurfaceDragHovering = targeted
+                surfaceDropReleaseTask?.cancel()
+                if targeted {
+                    isSurfaceDropTargeted = true
+                } else {
+                    // Keep the compact role strip alive while the pointer
+                    // crosses from the parent card into a nested role target.
+                    surfaceDropReleaseTask = Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 650_000_000)
+                        guard !Task.isCancelled else { return }
+                        isSurfaceDropTargeted = false
+                    }
+                }
+            }
+        )
+    }
+
+    private var orderDropEdge: VerticalEdge? {
+        guard let sourceSetID = SetOrderDragTransport.currentPayload?.setID,
+              sourceSetID != set.id,
+              let sourceIndex = model.sets.firstIndex(where: { $0.id == sourceSetID }),
+              let targetIndex = model.sets.firstIndex(where: { $0.id == set.id }) else { return nil }
+        return sourceIndex < targetIndex ? .bottom : .top
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            RoleDropStrip(model: model, set: set)
-                .padding(.horizontal, 11)
-                .padding(.bottom, 8)
+            if showsRoleDropStrip {
+                RoleDropStrip(model: model, set: set)
+                    .padding(.horizontal, 11)
+                    .padding(.bottom, 8)
+            }
             if isEffectivelyExpanded {
                 Divider().padding(.leading, 12)
                 content
@@ -588,6 +626,37 @@ struct SetCardView: View {
                 .frame(width: 4)
                 .padding(.vertical, 8)
         }
+        .overlay(alignment: orderDropEdge == .bottom ? .bottom : .top) {
+            if isOrderDropTargeted && allowsReordering, orderDropEdge != nil {
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(height: 3)
+                    .padding(.horizontal, 5)
+                    .offset(y: orderDropEdge == .bottom ? 2 : -2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(
+            of: [SurfaceDragTransport.contentType],
+            isTargeted: surfaceDropTargetBinding
+        ) { _ in
+            // Registering the parent card as a surface destination gives a
+            // collapsed set spring-loaded expansion. The nested role targets
+            // still own the actual drop and choose Worker/Reviewer/PR/Other.
+            false
+        }
+        .onDrop(
+            of: [SetOrderDragTransport.contentType],
+            isTargeted: $isOrderDropTargeted
+        ) { providers in
+            guard allowsReordering else { return false }
+            return SetOrderDragTransport.receiveOne(from: providers) { payload in
+                _ = model.moveSet(payload.setID, relativeTo: set.id)
+            }
+        }
+        .animation(.easeInOut(duration: 0.16), value: isEffectivelyExpanded)
+        .animation(.easeInOut(duration: 0.14), value: showsRoleDropStrip)
+        .onDisappear { surfaceDropReleaseTask?.cancel() }
         .alert("PR 링크 추가", isPresented: $showAddLink) {
             TextField("라벨", text: $linkLabel)
             TextField("https://github.com/…/pull/…", text: $linkURL)
@@ -614,11 +683,30 @@ struct SetCardView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Button { isExpanded.toggle() } label: {
+            SetOrderDragHandle(
+                set: set,
+                isEnabled: allowsReordering,
+                disabledHelp: "검색을 지우면 세트 순서를 변경할 수 있습니다"
+            )
+
+            Button { model.toggleSetCollapsed(set.id) } label: {
                 Image(systemName: isEffectivelyExpanded ? "chevron.down" : "chevron.right")
                     .font(.caption.weight(.semibold))
+                    .frame(width: 22, height: 22)
             }
             .buttonStyle(.plain)
+            .disabled(forceExpanded)
+            .help(
+                forceExpanded
+                    ? "검색 결과를 표시하는 동안 임시로 펼쳐집니다"
+                    : (isStoredCollapsed ? "\(set.label) 세트 펼치기" : "\(set.label) 세트 최소화")
+            )
+            .accessibilityLabel(
+                forceExpanded
+                    ? "\(set.label) 검색 중 임시 펼쳐짐"
+                    : (isStoredCollapsed ? "\(set.label) 세트 펼치기" : "\(set.label) 세트 최소화")
+            )
+            .accessibilityValue(isEffectivelyExpanded ? "펼쳐짐" : "접힘")
 
             if isRenaming {
                 TextField("세트 이름", text: $editedName)
@@ -641,9 +729,24 @@ struct SetCardView: View {
 
             Spacer()
 
-            Label(effectiveStatusName, systemImage: set.isCurrentGenerationCompleted ? "checkmark.circle.fill" : evaluation.status.symbolName)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(set.isCurrentGenerationCompleted ? Color.blue : evaluation.status.color)
+            ViewThatFits(in: .horizontal) {
+                Label(
+                    effectiveStatusName,
+                    systemImage: set.isCurrentGenerationCompleted
+                        ? "checkmark.circle.fill"
+                        : evaluation.status.symbolName
+                )
+                Image(
+                    systemName: set.isCurrentGenerationCompleted
+                        ? "checkmark.circle.fill"
+                        : evaluation.status.symbolName
+                )
+                .help(effectiveStatusName)
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(set.isCurrentGenerationCompleted ? Color.blue : evaluation.status.color)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(effectiveStatusName)
 
             Menu {
                 if set.armed {
@@ -671,6 +774,15 @@ struct SetCardView: View {
                     editedName = set.label
                     isRenaming = true
                 }
+                Divider()
+                Button(isStoredCollapsed ? "세트 펼치기" : "세트 최소화") {
+                    model.toggleSetCollapsed(set.id)
+                }
+                .disabled(forceExpanded)
+                Button("한 칸 위로") { _ = model.moveSet(set.id, by: -1) }
+                    .disabled(!allowsReordering || !model.canMoveSet(set.id, by: -1))
+                Button("한 칸 아래로") { _ = model.moveSet(set.id, by: 1) }
+                    .disabled(!allowsReordering || !model.canMoveSet(set.id, by: 1))
                 Divider()
                 Button("세트 삭제", role: .destructive) { model.deleteSet(set.id) }
             } label: {
@@ -1318,6 +1430,75 @@ struct SurfaceDragHandle: View {
             .help(help)
             .accessibilityLabel("드래그 핸들")
             .accessibilityHint(help)
+    }
+}
+
+struct SetOrderDragHandle: View {
+    let set: WorkSet
+    let isEnabled: Bool
+    var disabledHelp = "현재는 세트 순서를 변경할 수 없습니다"
+    @State private var isHovering = false
+
+    var body: some View {
+        Group {
+            if isEnabled {
+                handle
+                    .onDrag({
+                        SetOrderDragTransport.provider(
+                            for: SetOrderDragPayload(setID: set.id)
+                        )
+                    }, preview: {
+                        SetOrderDragPreview(set: set)
+                    })
+            } else {
+                handle
+                    .opacity(0.42)
+            }
+        }
+        .onHover { isHovering = isEnabled && $0 }
+        .help(isEnabled ? "세트를 끌어 표시 순서 변경" : disabledHelp)
+        .accessibilityLabel("\(set.label) 세트 순서 드래그 핸들")
+        .accessibilityHint(
+            isEnabled
+                ? "다른 세트 위에 놓아 표시 순서를 변경합니다"
+                : disabledHelp
+        )
+    }
+
+    private var handle: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(isHovering ? Color.accentColor : Color.secondary)
+            .frame(width: 26, height: 28)
+            .background(
+                isHovering ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.055),
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+            .contentShape(Rectangle())
+    }
+}
+
+private struct SetOrderDragPreview: View {
+    let set: WorkSet
+
+    var body: some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color(companionHex: set.color))
+                .frame(width: 4, height: 28)
+            Image(systemName: "arrow.up.arrow.down")
+                .foregroundStyle(Color.accentColor)
+            Text(set.label)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
+        .overlay {
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(Color.accentColor.opacity(0.45))
+        }
     }
 }
 
