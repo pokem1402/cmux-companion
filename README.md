@@ -6,7 +6,8 @@ and surfaces transitions outside cmux without patching or re-signing cmux.
 
 The repository builds three deliverables:
 
-- `CmuxCompanion.app`: menu-bar UI, floating pet/HUD, notifications, and cmux jump actions.
+- `CmuxCompanion.app`: menu-bar UI, full Dashboard, floating pet/HUD,
+  notifications, and cmux jump actions.
 - `cmux-set`: a terminal helper for manually linking the current cmux surface.
 - `remote-hook-bridge.sh`: a telemetry bridge for agents running through `cmux ssh`.
 
@@ -50,18 +51,18 @@ To produce the two assets required by the in-app updater, set the release
 version and monotonically increasing build number, then run:
 
 ```bash
-CMUX_COMPANION_VERSION=0.1.7 \
-CMUX_COMPANION_BUILD_NUMBER=8 \
+CMUX_COMPANION_VERSION=0.1.8 \
+CMUX_COMPANION_BUILD_NUMBER=9 \
 ./scripts/package-release.sh
 ```
 
 The helper rebuilds the app, sanitizes metadata, creates the ZIP and SHA-256
 sidecar under `dist/release/`, then extracts and verifies the result. For a tag
-named `v0.1.7`, upload both assets without renaming them:
+named `v0.1.8`, upload both assets without renaming them:
 
 ```text
-CmuxCompanion-v0.1.7-macos-arm64.zip
-CmuxCompanion-v0.1.7-macos-arm64.zip.sha256
+CmuxCompanion-v0.1.8-macos-arm64.zip
+CmuxCompanion-v0.1.8-macos-arm64.zip.sha256
 ```
 
 These names are exact: the updater ignores a release if either asset is absent
@@ -107,6 +108,18 @@ The fixed search field accepts set, group, workspace, terminal, and agent
 names. Searching a terminal keeps every destination set visible; searching a
 set or group keeps the source tray visible, so filtering never removes the
 other half of a drag-and-drop registration.
+
+Use the `Dashboard` window button in the popover header (or press `Shift-Command-D`
+while Companion is active) for the full management surface. The Dashboard
+shares the exact same model and `sets.json` with the menu-bar popover: changes
+to groups, roles, links, colors, and monitoring state appear in both places
+immediately. Its left sidebar navigates sets, the responsive center board keeps
+all drag destinations available, and the right panel shows every live cmux
+surface with workspace, agent, remote status, and last-prompt context. The
+window is resizable and supports full screen; size and position are restored
+after relaunch and clamped to a connected display. While it is open Companion
+temporarily appears in the Dock. Closing it returns the app to menu-bar-only
+mode without stopping monitoring, notifications, the pet, or the HUD.
 
 The gear menu provides compact/default/large presets plus width and height
 sliders. The chosen popover size is restored after relaunch and clamped to the

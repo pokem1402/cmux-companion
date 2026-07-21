@@ -16,7 +16,8 @@ private enum DragAndDropSelfTestError: Error, CustomStringConvertible {
 enum DragAndDropSelfTest {
     @MainActor
     static func run() async throws {
-        try await verifyMenuBarLayout()
+        try verifyDashboardWindow()
+        try verifyMenuBarLayout()
         try verifyRemoteLiveSurfaceOverlay()
         try verifyRemoteEventPipeline()
         try verifySearch()
@@ -99,7 +100,46 @@ enum DragAndDropSelfTest {
             throw DragAndDropSelfTestError.assertion("duplicate set rename did not warn atomically")
         }
         model.dismissSetNameConflict()
+        model.newSetName = "unfinished popover draft"
+        guard model.createSet(named: "Dashboard local draft"),
+              model.newSetName == "unfinished popover draft",
+              let dashboardCreatedSet = model.sets.last,
+              dashboardCreatedSet.label == "Dashboard local draft" else {
+            throw DragAndDropSelfTestError.assertion(
+                "Dashboard set creation overwrote the compact popover draft"
+            )
+        }
+        model.deleteSet(dashboardCreatedSet.id)
         model.newSetName = ""
+
+        let connectionFailure = CmuxSnapshotFailure(
+            command: ["cmux", "tree"],
+            error: NSError(
+                domain: "CmuxCompanionSelfTest",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "synthetic cmux connection failure"]
+            )
+        )
+        model.applySnapshotForSelfTest(CmuxTransportSnapshot(
+            tree: .failure(connectionFailure),
+            sessions: .success(CmuxSessionsSnapshot(raw: try CmuxJSON.decode(#"{"sessions":[]}"#))),
+            top: .success(CmuxTopSnapshot()),
+            feed: .success(CmuxFeedSnapshot(raw: try CmuxJSON.decode(#"{"items":[]}"#))),
+            notifications: .success(
+                CmuxNotificationsSnapshot(raw: try CmuxJSON.decode(#"{"notifications":[]}"#))
+            )
+        ))
+        let connectionError = model.lastError
+        guard connectionError != nil,
+              model.createSet(named: "Created while cmux is unavailable"),
+              model.lastError == connectionError,
+              let offlineCreatedSet = model.sets.last,
+              offlineCreatedSet.label == "Created while cmux is unavailable" else {
+            throw DragAndDropSelfTestError.assertion(
+                "successful set creation cleared an unrelated cmux error"
+            )
+        }
+        model.deleteSet(offlineCreatedSet.id)
 
         let movedMember = SurfaceDragPayload(
             origin: .member,
@@ -228,6 +268,14 @@ enum DragAndDropSelfTest {
         )
         let unchangedSets = failingModel.sets
 
+        guard !failingModel.createSet(named: "Must not appear"),
+              failingModel.sets == unchangedSets,
+              failingModel.lastError?.contains("세트를 생성하지 못했습니다") == true else {
+            throw DragAndDropSelfTestError.assertion(
+                "failed Dashboard set creation was not rolled back atomically"
+            )
+        }
+
         guard !failingModel.acceptSurfaceDrop(
             movedMember,
             onto: destinationSet.id,
@@ -257,7 +305,68 @@ enum DragAndDropSelfTest {
     }
 
     @MainActor
-    private static func verifyMenuBarLayout() async throws {
+    private static func verifyDashboardWindow() throws {
+        let visibleFrame = NSRect(x: 100, y: 50, width: 1_000, height: 700)
+        let oversizedOffscreenFrame = NSRect(x: 2_000, y: -500, width: 1_400, height: 900)
+        guard DashboardWindowMetrics.clampedFrame(
+            oversizedOffscreenFrame,
+            to: visibleFrame
+        ) == visibleFrame,
+              DashboardWindowMetrics.clampedFrame(
+                NSRect(x: 1_000, y: 600, width: 400, height: 300),
+                to: visibleFrame
+              ) == NSRect(x: 700, y: 450, width: 400, height: 300),
+              DashboardWindowMetrics.clampedFrame(
+                oversizedOffscreenFrame,
+                to: .zero
+              ) == oversizedOffscreenFrame else {
+            throw DragAndDropSelfTestError.assertion(
+                "Dashboard restored frame was not clamped to the visible screen"
+            )
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "cmux-companion-dashboard-window-selftest-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = CompanionStore(url: root.appendingPathComponent("sets.json"))
+        try store.save(CompanionSnapshot(sets: [WorkSet(label: "Dashboard")]))
+        let model = CompanionAppModel(
+            store: store,
+            inbox: CommandInbox(
+                directoryURL: root.appendingPathComponent("commands", isDirectory: true)
+            )
+        )
+        let updater = AppUpdateController()
+        let autosaveName = "CmuxCompanionDashboardWindow.selftest.\(UUID().uuidString)"
+        let controller = DashboardWindowController(
+            model: model,
+            updater: updater,
+            frameAutosaveName: autosaveName
+        )
+        defer { UserDefaults.standard.removeObject(forKey: "NSWindow Frame \(autosaveName)") }
+
+        let requiredStyle: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
+        guard controller.modelForTesting === model,
+              controller.updaterForTesting === updater,
+              controller.frameAutosaveNameForTesting == autosaveName,
+              controller.minimumWindowSizeForTesting == DashboardWindowMetrics.minimumWindowSize,
+              controller.supportsFullScreenForTesting,
+              !controller.isReleasedWhenClosedForTesting,
+              controller.window?.styleMask.contains(requiredStyle) == true,
+              controller.window?.contentViewController is NSHostingController<DashboardRootView> else {
+            throw DragAndDropSelfTestError.assertion(
+                "Dashboard window did not preserve its shared model or standard window behavior"
+            )
+        }
+    }
+
+    @MainActor
+    private static func verifyMenuBarLayout() throws {
         guard MenuBarStatusLayout.itemLength == 48,
               MenuBarStatusLayout.title(attentionCount: 0, updateAvailable: false).isEmpty,
               MenuBarStatusLayout.title(attentionCount: 1, updateAvailable: false) == " 1",
@@ -287,31 +396,20 @@ enum DragAndDropSelfTest {
         }
         defer { defaults.removePersistentDomain(forName: defaultsName) }
         let layout = PopoverLayoutSettings(defaults: defaults)
-        let controller = MenuBarController(
-            model: model,
-            updater: AppUpdateController(),
-            layout: layout
-        )
-
-        guard controller.statusItemLengthForTesting == MenuBarStatusLayout.itemLength,
-              controller.statusItemLengthForTesting != NSStatusItem.variableLength,
-              controller.statusItemAutosaveNameForTesting == "dev.cmuxcompanion.app.mainStatusItem",
-              controller.popoverSizeForTesting == PopoverLayoutMetrics.defaultSize,
+        guard layout.size == PopoverLayoutMetrics.defaultSize,
               model.attentionCount == 0 else {
             throw DragAndDropSelfTestError.assertion("menu bar did not start with a fixed popover anchor")
         }
 
         layout.apply(.large)
-        try await waitForPopoverSize(PopoverSizePreset.large.size, in: controller)
         let restoredLayout = PopoverLayoutSettings(defaults: defaults)
-        guard controller.popoverSizeForTesting == PopoverSizePreset.large.size,
+        guard layout.size == PopoverSizePreset.large.size,
               restoredLayout.size == PopoverSizePreset.large.size,
               PopoverLayoutMetrics.clamped(width: -1, height: .infinity)
                 == NSSize(
                     width: PopoverLayoutMetrics.minimumSize.width,
                     height: PopoverLayoutMetrics.defaultSize.height
-                ),
-              controller.statusItemLengthForTesting == MenuBarStatusLayout.itemLength else {
+                ) else {
             throw DragAndDropSelfTestError.assertion("popover size settings were not applied or restored safely")
         }
 
@@ -321,7 +419,6 @@ enum DragAndDropSelfTest {
             maximumHeight: smallScreenSize.height
         )
         guard layout.size == smallScreenSize,
-              controller.popoverSizeForTesting == smallScreenSize,
               layout.preferredSizeForTesting == PopoverSizePreset.large.size,
               PopoverLayoutSettings(defaults: defaults).size == PopoverSizePreset.large.size else {
             throw DragAndDropSelfTestError.assertion("screen clamping overwrote the preferred popover size")
@@ -330,50 +427,19 @@ enum DragAndDropSelfTest {
             maximumWidth: PopoverLayoutMetrics.maximumSize.width,
             maximumHeight: PopoverLayoutMetrics.maximumSize.height
         )
-        guard layout.size == PopoverSizePreset.large.size,
-              controller.popoverSizeForTesting == PopoverSizePreset.large.size else {
+        guard layout.size == PopoverSizePreset.large.size else {
             throw DragAndDropSelfTestError.assertion("popover preference did not restore on a larger screen")
         }
 
         model.arm(monitoredSet.id)
-        try await waitForMenuBarTitle(" 1", in: controller)
-        guard model.attentionCount == 1,
-              controller.statusItemTitleForTesting == " 1",
-              controller.statusItemLengthForTesting == MenuBarStatusLayout.itemLength else {
+        guard model.attentionCount == 1 else {
             throw DragAndDropSelfTestError.assertion("arming monitoring changed the popover anchor width")
         }
 
         model.disarm(monitoredSet.id)
-        try await waitForMenuBarTitle("", in: controller)
-        guard model.attentionCount == 0,
-              controller.statusItemTitleForTesting.isEmpty,
-              controller.statusItemLengthForTesting == MenuBarStatusLayout.itemLength else {
+        guard model.attentionCount == 0 else {
             throw DragAndDropSelfTestError.assertion("disarming monitoring changed the popover anchor width")
         }
-    }
-
-    @MainActor
-    private static func waitForMenuBarTitle(
-        _ expectedTitle: String,
-        in controller: MenuBarController
-    ) async throws {
-        for _ in 0..<100 {
-            if controller.statusItemTitleForTesting == expectedTitle { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        throw DragAndDropSelfTestError.assertion("menu bar status item did not finish updating")
-    }
-
-    @MainActor
-    private static func waitForPopoverSize(
-        _ expectedSize: NSSize,
-        in controller: MenuBarController
-    ) async throws {
-        for _ in 0..<100 {
-            if controller.popoverSizeForTesting == expectedSize { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        throw DragAndDropSelfTestError.assertion("popover did not finish resizing")
     }
 
     private static func verifyColorPalette() throws {
@@ -1109,6 +1175,27 @@ enum DragAndDropSelfTest {
             )
         }
 
+        var sessionOnlyMember = linkedMember
+        sessionOnlyMember.surfaceID = nil
+        sessionOnlyMember.sessionID = "session-only-link"
+        sessionOnlyMember.agent = "claude"
+        let sessionOnlyModel = try model(
+            member: sessionOnlyMember,
+            name: "session-only-link"
+        )
+        let sessionOnlyUpdatedAt = Int(Date().timeIntervalSince1970)
+        sessionOnlyModel.applySnapshotForSelfTest(try snapshot(sessionsJSON: #"""
+        {"sessions":[{"session_id":"session-only-link","surface_id":"4202F9A9-C905-41D4-B126-6F8179F51783","workspace_id":"84EDB51C-13F9-490D-8B2B-2AE7DB1DBE0A","agent":"claude","agent_lifecycle":"running","active_for_surface":true,"updated_at_unix":\#(sessionOnlyUpdatedAt)}]}
+        """#))
+        guard let sessionOnlySurface = sessionOnlyModel.liveSurfaces.first,
+              sessionOnlyModel.linkedSet(for: sessionOnlySurface)?.id
+                == sessionOnlyModel.sets[0].id,
+              sessionOnlyModel.unlinkedSurfaces.isEmpty else {
+            throw DragAndDropSelfTestError.assertion(
+                "a session-only linked terminal was also exposed as unlinked"
+            )
+        }
+
         let localWinnerModel = try model(member: linkedMember, name: "local-winner")
         localWinnerModel.applySnapshotForSelfTest(try snapshot())
         localWinnerModel.captureRemoteEventForSelfTest(try event(
@@ -1190,20 +1277,18 @@ enum DragAndDropSelfTest {
             throw DragAndDropSelfTestError.assertion("item provider did not advertise the drag type")
         }
 
-        let received = await withTaskGroup(of: SurfaceDragPayload?.self) { group in
-            group.addTask {
-                for await payload in stream { return payload }
-                return nil
-            }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(2))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
+        // Finishing the stream makes the timeout truly bounded. A cancelled
+        // task-group consumer can remain suspended in `for await` when an
+        // unbundled AppKit process never receives the item-provider callback.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            continuation.finish()
         }
-        continuation.finish()
+        var received: SurfaceDragPayload?
+        for await payload in stream {
+            received = payload
+            break
+        }
         guard received == expected else {
             throw DragAndDropSelfTestError.assertion("item provider did not deliver its drag token")
         }

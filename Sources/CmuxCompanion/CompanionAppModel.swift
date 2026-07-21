@@ -196,17 +196,35 @@ final class CompanionAppModel: ObservableObject {
 
     @discardableResult
     func createSet() -> Bool {
-        guard ensureStoreWritable() else { return false }
         let label = newSetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let created = createSet(named: label)
+        if created { newSetName = "" }
+        return created
+    }
+
+    /// Creates a set from view-local input. The compact popover keeps its
+    /// existing shared draft for backward compatibility, while the Dashboard
+    /// can own an independent draft so opening both surfaces never overwrites
+    /// text that has not been submitted yet.
+    @discardableResult
+    func createSet(named rawLabel: String) -> Bool {
+        guard ensureStoreWritable() else { return false }
+        let label = rawLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !label.isEmpty else { return false }
         if let existingName = existingSetName(matching: label) {
             conflictingSetName = existingName
             return false
         }
-        sets.append(WorkSet(label: label, color: paletteColor(for: sets.count)))
-        newSetName = ""
+        var proposedSets = sets
+        proposedSets.append(WorkSet(label: label, color: paletteColor(for: sets.count)))
+        guard commitPersistedSets(
+            proposedSets,
+            failurePrefix: "세트를 생성하지 못했습니다",
+            preserveUnrelatedErrorOnSuccess: true
+        ) else {
+            return false
+        }
         conflictingSetName = nil
-        persistAndEvaluate()
         return true
     }
 
@@ -716,17 +734,20 @@ final class CompanionAppModel: ObservableObject {
         onPetVisibilityChanged?(showPet)
     }
 
-    var linkedSurfaceIDs: Set<String> {
-        Set(sets.flatMap { set in
-            set.members.compactMap(\.surfaceID) + set.attachments.compactMap(\.surfaceID)
-        })
+    func linkedSet(for surface: LiveSurface) -> WorkSet? {
+        let surfaceAliases = Set([surface.id, surface.ref].compactMap { $0 })
+        return sets.first { set in
+            set.members.contains { member in
+                member.surfaceID.map(surfaceAliases.contains) == true
+                    || (member.sessionID != nil && member.sessionID == surface.sessionID)
+            } || set.attachments.contains { attachment in
+                attachment.surfaceID.map(surfaceAliases.contains) == true
+            }
+        }
     }
 
     var unlinkedSurfaces: [LiveSurface] {
-        liveSurfaces.filter { surface in
-            !linkedSurfaceIDs.contains(surface.id)
-                && surface.ref.map(linkedSurfaceIDs.contains) != true
-        }
+        liveSurfaces.filter { linkedSet(for: $0) == nil }
     }
 
     func workload(for member: WorkMember) -> SurfaceWorkload {
@@ -1673,18 +1694,39 @@ final class CompanionAppModel: ObservableObject {
     /// A failed save therefore cannot leave the UI ahead of the on-disk state
     /// or make a move appear successful until the next app launch reverts it.
     private func commitDragMutation(_ proposedSets: [WorkSet]) -> Bool {
+        commitPersistedSets(
+            proposedSets,
+            failurePrefix: "드래그 변경을 저장하지 못했습니다"
+        )
+    }
+
+    /// Saves before publishing so a failed mutation never appears in the UI
+    /// only to disappear after relaunch. Callers choose an operation-specific
+    /// prefix while sharing the same atomic store/publish sequence.
+    private func commitPersistedSets(
+        _ proposedSets: [WorkSet],
+        failurePrefix: String,
+        preserveUnrelatedErrorOnSuccess: Bool = false
+    ) -> Bool {
         if let storeLoadFailureMessage {
             lastError = storeLoadFailureMessage
             return false
         }
+        let previousError = lastError
         do {
             try store.save(sets: proposedSets)
         } catch {
-            lastError = "드래그 변경을 저장하지 못했습니다: \(error.localizedDescription)"
+            lastError = "\(failurePrefix): \(error.localizedDescription)"
             return false
         }
         sets = proposedSets
-        lastError = nil
+        if preserveUnrelatedErrorOnSuccess,
+           let previousError,
+           !previousError.hasPrefix("\(failurePrefix):") {
+            lastError = previousError
+        } else {
+            lastError = nil
+        }
         recalculateEvaluations(notifyTransitions: true)
         return true
     }

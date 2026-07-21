@@ -6,10 +6,12 @@ struct CompanionRootView: View {
     @ObservedObject var model: CompanionAppModel
     @ObservedObject var updater: AppUpdateController
     @ObservedObject var layout: PopoverLayoutSettings
+    let onOpenDashboard: () -> Void
     @State private var showHookConfirmation = false
     @State private var showUpdateConfirmation = false
     @State private var showSettings = false
     @State private var searchText = ""
+    @State private var presentedSetNameConflict: String?
 
     private var searchResults: CompanionSearchResults {
         CompanionSearch.results(
@@ -113,15 +115,15 @@ struct CompanionRootView: View {
         .alert(
             "이미 사용 중인 세트 이름",
             isPresented: Binding(
-                get: { model.conflictingSetName != nil },
+                get: { presentedSetNameConflict != nil },
                 set: { isPresented in
-                    if !isPresented { model.dismissSetNameConflict() }
+                    if !isPresented { presentedSetNameConflict = nil }
                 }
             )
         ) {
-            Button("확인", role: .cancel) { model.dismissSetNameConflict() }
+            Button("확인", role: .cancel) { presentedSetNameConflict = nil }
         } message: {
-            Text("“\(model.conflictingSetName ?? "")” 세트가 이미 있습니다. 다른 이름을 입력해 주세요.")
+            Text("“\(presentedSetNameConflict ?? "")” 세트가 이미 있습니다. 다른 이름을 입력해 주세요.")
         }
     }
 
@@ -166,6 +168,12 @@ struct CompanionRootView: View {
             }
             .buttonStyle(.borderless)
             .help("새로고침")
+            Button(action: onOpenDashboard) {
+                Image(systemName: "macwindow")
+            }
+            .buttonStyle(.borderless)
+            .keyboardShortcut("d", modifiers: [.command, .shift])
+            .help("Dashboard 열기 (⇧⌘D)")
             Button {
                 showSettings.toggle()
             } label: {
@@ -370,8 +378,8 @@ struct CompanionRootView: View {
             HStack(spacing: 8) {
                 TextField("새 세트 이름 (예: PR-142)", text: $model.newSetName)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { model.createSet() }
-                Button("추가") { model.createSet() }
+                    .onSubmit(createSetFromPopover)
+                Button("추가", action: createSetFromPopover)
                     .disabled(model.newSetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             if let existingName = model.existingSetName(matching: model.newSetName) {
@@ -383,6 +391,12 @@ struct CompanionRootView: View {
         }
         .padding(10)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func createSetFromPopover() {
+        guard !model.createSet(), let conflict = model.conflictingSetName else { return }
+        model.dismissSetNameConflict()
+        presentedSetNameConflict = conflict
     }
 
     /// Keep drag sources visible while the independent set list scrolls. With
@@ -530,7 +544,7 @@ private struct CompanionSettingsView: View {
     }
 }
 
-private struct SetCardView: View {
+struct SetCardView: View {
     @ObservedObject var model: CompanionAppModel
     let set: WorkSet
     let evaluation: SetEvaluation
@@ -540,6 +554,7 @@ private struct SetCardView: View {
     @State private var editedName = ""
     @State private var showAddLink = false
     @State private var showColorPicker = false
+    @State private var presentedSetNameConflict: String?
     @State private var linkLabel = "PR 페이지"
     @State private var linkURL = ""
 
@@ -583,6 +598,17 @@ private struct SetCardView: View {
             Button("취소", role: .cancel) {}
         } message: {
             Text("cmux 브라우저 자동 탐색 없이도 이 세트와 PR 페이지를 연결합니다.")
+        }
+        .alert(
+            "이미 사용 중인 세트 이름",
+            isPresented: Binding(
+                get: { presentedSetNameConflict != nil },
+                set: { if !$0 { presentedSetNameConflict = nil } }
+            )
+        ) {
+            Button("확인", role: .cancel) { presentedSetNameConflict = nil }
+        } message: {
+            Text("“\(presentedSetNameConflict ?? "")” 세트가 이미 있습니다. 다른 이름을 입력해 주세요.")
         }
     }
 
@@ -713,6 +739,9 @@ private struct SetCardView: View {
     private func commitRename() {
         if model.renameSet(set.id, to: editedName) {
             isRenaming = false
+        } else if let conflict = model.conflictingSetName {
+            model.dismissSetNameConflict()
+            presentedSetNameConflict = conflict
         }
     }
 }
@@ -1150,7 +1179,7 @@ private struct AttachmentRow: View {
     }
 }
 
-private struct UnlinkedSurfaceRow: View {
+struct UnlinkedSurfaceRow: View {
     @ObservedObject var model: CompanionAppModel
     let surface: LiveSurface
 
@@ -1209,7 +1238,7 @@ private struct UnlinkedSurfaceRow: View {
     }
 }
 
-private struct WorkloadBadge: View {
+struct WorkloadBadge: View {
     let workload: SurfaceWorkload
     let isRemote: Bool
 
@@ -1229,7 +1258,7 @@ private struct WorkloadBadge: View {
     }
 }
 
-private extension SurfaceWorkload {
+extension SurfaceWorkload {
     var symbolName: String {
         switch self {
         case .codex: return "chevron.left.forwardslash.chevron.right"
@@ -1253,7 +1282,7 @@ private extension SurfaceWorkload {
     }
 }
 
-private struct SurfaceDragHandle: View {
+struct SurfaceDragHandle: View {
     let payload: SurfaceDragPayload
     let previewTitle: String
     let previewSubtitle: String
@@ -1292,7 +1321,7 @@ private struct SurfaceDragHandle: View {
     }
 }
 
-private struct UnlinkDropTarget: View {
+struct UnlinkDropTarget: View {
     @ObservedObject var model: CompanionAppModel
     @State private var isTargeted = false
 

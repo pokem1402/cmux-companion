@@ -24,6 +24,7 @@ final class MenuBarController {
     private let model: CompanionAppModel
     private let updater: AppUpdateController
     private let layout: PopoverLayoutSettings
+    private let onOpenDashboard: () -> Void
     private var cancellables: Set<AnyCancellable> = []
 
     /// Kept internal so the app self-test can guard the real AppKit anchor,
@@ -36,18 +37,25 @@ final class MenuBarController {
     init(
         model: CompanionAppModel,
         updater: AppUpdateController,
-        layout: PopoverLayoutSettings
+        layout: PopoverLayoutSettings,
+        onOpenDashboard: @escaping () -> Void = {}
     ) {
         self.model = model
         self.updater = updater
         self.layout = layout
+        self.onOpenDashboard = onOpenDashboard
         self.statusItem = NSStatusBar.system.statusItem(withLength: MenuBarStatusLayout.itemLength)
         statusItem.autosaveName = Self.statusItemAutosaveName
         popover.behavior = .transient
         popover.animates = true
         popover.contentSize = layout.size
         popover.contentViewController = NSHostingController(
-            rootView: CompanionRootView(model: model, updater: updater, layout: layout)
+            rootView: CompanionRootView(
+                model: model,
+                updater: updater,
+                layout: layout,
+                onOpenDashboard: { [weak self] in self?.openDashboard() }
+            )
         )
 
         if let button = statusItem.button {
@@ -90,6 +98,16 @@ final class MenuBarController {
         guard let button = statusItem.button else { return }
         if !popover.isShown {
             presentPopover(relativeTo: button)
+        }
+    }
+
+    func openDashboard() {
+        popover.performClose(nil)
+        // Let the transient popover resign key before promoting the app and
+        // ordering the normal Dashboard window. Doing both in one AppKit turn
+        // can leave the popover as the apparent key window.
+        DispatchQueue.main.async { [onOpenDashboard] in
+            onOpenDashboard()
         }
     }
 
