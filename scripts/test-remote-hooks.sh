@@ -58,7 +58,7 @@ printf '%s' '{"session_id":"native-session","hook_event_name":"PermissionRequest
     CMUX_BUNDLED_CLI_PATH="$fake_cmux" \
     CMUX_SOCKET_PATH=127.0.0.1:43123 \
     CMUX_WORKSPACE_ID=workspace-1 \
-    CMUX_SURFACE_ID=surface-1 \
+    CMUX_SURFACE_ID=surface:1 \
     CMUX_COMPANION_HOOK_RPC_TIMEOUT_MS=500 \
     CMUX_COMPANION_HOOK_RPC_ATTEMPTS=2 \
     "$bridge" --source codex
@@ -76,7 +76,7 @@ assert payload["wait_timeout_seconds"] == 0
 assert event["hook_event_name"] == "Notification"
 assert event["_cmux_companion_original_event"] == "PermissionRequest"
 assert event["tool_name"] == "cmux-companion-remote-event:PermissionRequest"
-assert event["session_id"] == "cmux-remote:surface-1:native-session"
+assert event["session_id"] == "cmux-remote:v2:surface%3A1:native-session"
 assert event["_opencode_request_id"].startswith("cmux-companion-seq:")
 assert isinstance(event["_received_at"], (int, float))
 assert "_ppid" not in event

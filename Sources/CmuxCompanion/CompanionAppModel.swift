@@ -5,6 +5,7 @@ import CmuxCompanionCore
 
 struct LiveSurface: Identifiable, Equatable {
     let id: String
+    var ref: String? = nil
     var windowID: String?
     var workspaceID: String?
     var workspaceTitle: String
@@ -71,6 +72,7 @@ final class CompanionAppModel: ObservableObject {
     private static let showPromptPreviewKey = "showPromptPreview"
     private let store: CompanionStore
     private let inbox: CommandInbox
+    private let remoteCacheURL: URL
     private var loader: CmuxSnapshotLoader?
     private var commandClient: CmuxCommandClient?
     private var eventStream: CmuxEventStream?
@@ -82,6 +84,8 @@ final class CompanionAppModel: ObservableObject {
     private var previousEvaluations: [UUID: SetEvaluation] = [:]
     private var lastNotificationFingerprints: [UUID: NotificationFingerprint] = [:]
     private var lastEventByRemoteSession: [String: RemoteEventState] = [:]
+    private var lastPersistedRemoteCacheData: Data?
+    private var pendingRemoteFrames: [CmuxEventFrame] = []
     private var transcriptCache: [String: TranscriptCacheEntry] = [:]
     private var lastGoodTree: CmuxTreeSnapshot?
     private var lastGoodSessions: [CmuxTransportSession] = []
@@ -100,8 +104,18 @@ final class CompanionAppModel: ObservableObject {
     ) {
         self.store = store
         self.inbox = inbox
+        let remoteCacheFilename = store.url.lastPathComponent == "sets.json"
+            ? "remote-events.json"
+            : "\(store.url.deletingPathExtension().lastPathComponent).remote-events.json"
+        self.remoteCacheURL = store.url.deletingLastPathComponent()
+            .appendingPathComponent(remoteCacheFilename)
         self.showPet = UserDefaults.standard.object(forKey: Self.showPetKey) as? Bool ?? true
         self.showPromptPreview = UserDefaults.standard.object(forKey: Self.showPromptPreviewKey) as? Bool ?? true
+
+        lastEventByRemoteSession = RemoteEventCacheStore.load(from: remoteCacheURL)
+        lastPersistedRemoteCacheData = try? RemoteEventCacheStore.encodedData(
+            for: lastEventByRemoteSession
+        )
 
         do {
             sets = try store.load().sets
@@ -709,7 +723,10 @@ final class CompanionAppModel: ObservableObject {
     }
 
     var unlinkedSurfaces: [LiveSurface] {
-        liveSurfaces.filter { !linkedSurfaceIDs.contains($0.id) }
+        liveSurfaces.filter { surface in
+            !linkedSurfaceIDs.contains(surface.id)
+                && surface.ref.map(linkedSurfaceIDs.contains) != true
+        }
     }
 
     func workload(for member: WorkMember) -> SurfaceWorkload {
@@ -813,7 +830,10 @@ final class CompanionAppModel: ObservableObject {
         }
     }
 
-    private func captureRemoteEvent(_ frame: CmuxEventFrame) {
+    private func captureRemoteEvent(
+        _ frame: CmuxEventFrame,
+        allowTopologyDeferral: Bool = true
+    ) {
         guard let payload = frame.payload else { return }
         let sessionID = payload.firstString(forKeys: ["session_id", "sessionId", "workstream_id"])
         guard let sessionID else { return }
@@ -821,17 +841,45 @@ final class CompanionAppModel: ObservableObject {
         // namespace emitted by our SSH bridge is allowed into the remote
         // cache, otherwise a local session could be mislabeled as remote.
         guard let identity = CmuxRemoteEventIdentity(sessionID: sessionID, payload: payload) else { return }
-        let source = payload.firstString(forKeys: ["_source", "source", "agent"])
+        guard identity.order != nil else { return }
+        let reportedSource = payload.firstString(forKeys: ["_source", "source", "agent"])
             ?? frame.source
+        guard let source = RemoteEventAdmission.source(reportedSource) else { return }
         let hookName = identity.originalHookName
             ?? frame.name?.replacingOccurrences(of: "agent.hook.", with: "")
             ?? payload.firstString(forKeys: ["hook_event_name", "hookEventName"])
-        let surfaceID = frame.surfaceID
-            ?? payload.firstString(forKeys: ["surface_id", "surfaceId", "panel_id"])
-            ?? identity.surfaceID
+        let payloadSurfaceID = payload.firstString(forKeys: [
+            "surface_id", "surfaceId", "panel_id",
+        ])
+        let knownSurfaceAliases = knownSurfaceAliasSets()
+        guard let surfaceID = RemoteEventAdmission.surfaceID(
+            identity: identity,
+            frameSurfaceID: frame.surfaceID,
+            payloadSurfaceID: payloadSurfaceID,
+            knownSurfaceAliases: knownSurfaceAliases
+        ) else {
+            if allowTopologyDeferral,
+               payloadSurfaceID == nil || payloadSurfaceID == identity.surfaceID,
+               let frameSurfaceID = frame.surfaceID,
+               frameSurfaceID != identity.surfaceID {
+                pendingRemoteFrames.removeAll { $0.id == frame.id }
+                pendingRemoteFrames.append(frame)
+                if pendingRemoteFrames.count > 64 {
+                    pendingRemoteFrames.removeFirst(pendingRemoteFrames.count - 64)
+                }
+            }
+            return
+        }
+        let surfaceAliases = surfaceIdentityAliases(for: surfaceID)
         let workspaceID = frame.workspaceID
             ?? payload.firstString(forKeys: ["workspace_id", "workspaceId"])
-        let text = payload.firstString(forKeys: ["prompt", "text", "message_preview", "last_user_message"])
+        let text = payload.firstString(forKeys: [
+            "prompt", "text", "message_preview", "last_user_message",
+        ])
+            ?? payload["tool_input"]?.firstString(forKeys: ["prompt", "text", "message"])
+            ?? payload["context"]?.firstString(forKeys: [
+                "lastUserMessage", "last_user_message", "prompt", "text",
+            ])
         let order = identity.order
         let isHeartbeat = hookName?.caseInsensitiveCompare("Heartbeat") == .orderedSame
         let receivedAt = Date()
@@ -844,7 +892,7 @@ final class CompanionAppModel: ObservableObject {
         )
         let exactExisting = lastEventByRemoteSession[sessionID]
         let surfaceExisting = lastEventByRemoteSession.values
-            .filter { $0.surfaceID == surfaceID }
+            .filter { $0.surfaceID.map(surfaceAliases.contains) == true }
             .max { $0.receivedAt < $1.receivedAt }
         for candidate in [exactExisting, surfaceExisting].compactMap({ $0 }) {
             if !CmuxRemoteLifecycle.isEventNewer(
@@ -857,10 +905,29 @@ final class CompanionAppModel: ObservableObject {
                 return
             }
         }
-        let persistedMember = persistedRemoteMember(sessionID: sessionID, surfaceID: surfaceID)
+        let persistedMember = persistedRemoteMember(
+            sessionID: sessionID,
+            surfaceIDs: surfaceAliases
+        )
+        let freshCachedHeartbeatTarget = [exactExisting, surfaceExisting]
+            .compactMap { $0 }
+            .contains {
+                !CmuxRemoteLifecycle.isIdentityExpired(lastSeenAt: $0.lastSeenAt)
+            }
+        let freshPersistedHeartbeatTarget = persistedMember.map {
+            !CmuxRemoteLifecycle.isIdentityExpired(lastSeenAt: $0.lastHeartbeatAt)
+        } == true
+        if isHeartbeat,
+           !freshCachedHeartbeatTarget,
+           !freshPersistedHeartbeatTarget {
+            // A heartbeat is a liveness refresh, not proof that an agent is
+            // currently running. In particular, the documented one-shot
+            // relay check must never turn an ordinary SSH shell into Codex.
+            return
+        }
         let surfaceWatermarkMember = persistedSurfaceMember(
             sessionID: sessionID,
-            surfaceID: surfaceID
+            surfaceIDs: surfaceAliases
         )
         if !CmuxRemoteLifecycle.isEventNewer(
             incomingOrder: order,
@@ -872,7 +939,7 @@ final class CompanionAppModel: ObservableObject {
             return
         }
         let localSurfaceMembers = sets.flatMap(\.members).filter {
-            $0.surfaceID == surfaceID && !$0.isRemote
+            $0.surfaceID.map(surfaceAliases.contains) == true && !$0.isRemote
         }
         let localSurfaceOwnerExists = !localSurfaceMembers.isEmpty
         if localSurfaceOwnerExists {
@@ -916,9 +983,11 @@ final class CompanionAppModel: ObservableObject {
             : previousPromptDate
         lastEventByRemoteSession[effectiveSessionID] = RemoteEventState(
             sessionID: effectiveSessionID,
-            source: source ?? existing?.source ?? persistedMember?.agent,
+            source: isHeartbeat
+                ? existing?.source ?? persistedMember?.agent ?? source
+                : source,
             surfaceID: surfaceID,
-            workspaceID: workspaceID,
+            workspaceID: isHeartbeat ? existing?.workspaceID ?? workspaceID : workspaceID,
             runtimeState: state,
             lastSubmittedText: promptText,
             lastSubmittedAt: promptDate,
@@ -926,6 +995,21 @@ final class CompanionAppModel: ObservableObject {
             receivedAt: receivedAt,
             lastSeenAt: occurredAt
         )
+        lastEventByRemoteSession = RemoteEventCachePolicy.retained(
+            lastEventByRemoteSession,
+            now: receivedAt
+        )
+        persistRemoteEventCache()
+    }
+
+    // Internal seams used by the executable regression suite to exercise the
+    // real event → snapshot → reconciliation path without a running cmux app.
+    func captureRemoteEventForSelfTest(_ frame: CmuxEventFrame) {
+        captureRemoteEvent(frame)
+    }
+
+    func applySnapshotForSelfTest(_ snapshot: CmuxTransportSnapshot) {
+        apply(snapshot)
     }
 
     private func apply(_ snapshot: CmuxTransportSnapshot) {
@@ -936,7 +1020,17 @@ final class CompanionAppModel: ObservableObject {
         let treeIsAuthoritative = freshTree != nil
         let sessionsAreAuthoritative = freshSessions != nil
 
-        if let freshTree { lastGoodTree = freshTree }
+        if let freshTree {
+            lastGoodTree = freshTree
+            canonicalizeRemoteEventSurfaceIDs(using: freshTree)
+            if !pendingRemoteFrames.isEmpty {
+                let deferredFrames = pendingRemoteFrames
+                pendingRemoteFrames.removeAll(keepingCapacity: true)
+                for frame in deferredFrames {
+                    captureRemoteEvent(frame, allowTopologyDeferral: false)
+                }
+            }
+        }
         if let freshSessions {
             lastGoodSessions = freshSessions
             hasGoodSessionsSnapshot = true
@@ -976,6 +1070,7 @@ final class CompanionAppModel: ObservableObject {
             sessions: sessions,
             feedItems: feedItems,
             processWorkloads: freshTop,
+            sessionsAreAuthoritative: sessionsAreAuthoritative,
             occupancyIsAuthoritative: treeIsAuthoritative && sessionsAreAuthoritative
         )
 
@@ -999,6 +1094,21 @@ final class CompanionAppModel: ObservableObject {
             topologyIsStale: topologyIsStale
         )
         persistAndEvaluate(notifyTransitions: hasAuthoritativeRefresh)
+        let liveSurfaceIDs = freshTree.map { tree in
+            Set(tree.windows.flatMap { window in
+                window.workspaces.flatMap { workspace in
+                    workspace.surfaces.flatMap { surface in
+                        [surface.id, surface.ref].compactMap { $0 }
+                    }
+                }
+            })
+        }
+        lastEventByRemoteSession = RemoteEventCachePolicy.retained(
+            lastEventByRemoteSession,
+            now: snapshot.loadedAt,
+            liveSurfaceIDs: liveSurfaceIDs
+        )
+        persistRemoteEventCache()
     }
 
     private func flatten(
@@ -1006,6 +1116,7 @@ final class CompanionAppModel: ObservableObject {
         sessions: [CmuxTransportSession],
         feedItems: [CmuxTransportFeedItem],
         processWorkloads: CmuxTopSnapshot?,
+        sessionsAreAuthoritative: Bool,
         occupancyIsAuthoritative: Bool
     ) -> [LiveSurface] {
         guard let tree else { return [] }
@@ -1021,8 +1132,63 @@ final class CompanionAppModel: ObservableObject {
         for window in tree.windows {
             for workspace in window.workspaces {
                 for surface in workspace.surfaces {
-                    let session = sessionBySurface[surface.id]
+                    let candidateSession = sessionBySurface[surface.id]
                         ?? surface.ref.flatMap { sessionBySurface[$0] }
+                    let candidateSessionUpdatedAt = candidateSession?.updatedAtUnix
+                        .map(Date.init(timeIntervalSince1970:))
+                        ?? parsedDate(candidateSession?.updatedAt)
+                    let candidateSessionIsRemote = candidateSession.map {
+                        CmuxRemoteEventIdentity.isRemoteSessionID($0.id)
+                    } == true
+                    let session = candidateSessionIsRemote
+                        && CmuxRemoteLifecycle.isIdentityExpired(
+                            lastSeenAt: candidateSessionUpdatedAt
+                        )
+                        ? nil
+                        : candidateSession
+                    let sessionIsRemote = session.map {
+                        CmuxRemoteEventIdentity.isRemoteSessionID($0.id)
+                    } == true
+                    let surfaceIDs = Set([surface.id, surface.ref].compactMap { $0 })
+                    let hasAuthoritativeCurrentSession = sessionsAreAuthoritative
+                        && session != nil
+                        && !sessionIsRemote
+                    let hasCachedCurrentSession = !sessionsAreAuthoritative
+                        && session != nil
+                        && !sessionIsRemote
+                    let cachedCurrentSessionUpdatedAt = sessionIsRemote
+                        ? nil
+                        : candidateSessionUpdatedAt
+                    var remoteObservation = remoteState(matchingSurfaceIDs: surfaceIDs)
+                    if var observation = remoteObservation {
+                        let cachedPrompt = observation.lastSubmittedText.map {
+                            ($0, observation.lastSubmittedAt)
+                        }
+                        if let prompt = newerPrompt(
+                            cachedPrompt,
+                            latestPrompt(
+                                sessionID: observation.sessionID,
+                                source: observation.source,
+                                in: feedItems
+                            )
+                        ) {
+                            observation.lastSubmittedText = prompt.text
+                            observation.lastSubmittedAt = prompt.date
+                            remoteObservation = observation
+                        }
+                    }
+                    if sessionIsRemote,
+                       let sessionUpdatedAt = candidateSessionUpdatedAt,
+                       let observation = remoteObservation,
+                       sessionUpdatedAt >= observation.lastSeenAt {
+                        // `sessions --all` can bridge an event-stream gap. A
+                        // newer current remote session (including an agent
+                        // switch) must beat older persisted hook telemetry.
+                        lastEventByRemoteSession = lastEventByRemoteSession.filter { _, event in
+                            event.surfaceID.map(surfaceIDs.contains) != true
+                        }
+                        remoteObservation = nil
+                    }
                     let kind = surface.type ?? "terminal"
                     let prompt = session.flatMap { latestPrompt(for: $0, in: feedItems) }
                     let displayPrompt = session == nil && kind.lowercased() != "browser"
@@ -1039,25 +1205,36 @@ final class CompanionAppModel: ObservableObject {
                         isBrowser: kind.lowercased() == "browser",
                         occupancyIsAuthoritative: occupancyIsAuthoritative
                     )
+                    let liveSurface = LiveSurface(
+                        id: surface.id,
+                        ref: surface.ref,
+                        windowID: window.id,
+                        workspaceID: workspace.id,
+                        workspaceTitle: workspace.title ?? workspace.ref ?? "Workspace",
+                        title: surface.title ?? session?.agentDisplayName ?? session?.agent ?? surface.type ?? "Surface",
+                        kind: kind,
+                        url: surface.url.flatMap(URL.init(string:)),
+                        agent: session?.agent ?? session?.agentDisplayName,
+                        sessionID: session?.id,
+                        runtimeState: session.map(runtimeState(for:)) ?? .unknown,
+                        lastSubmittedText: prompt?.text,
+                        lastSubmittedAt: prompt?.date,
+                        displayOnlyPromptText: displayPrompt?.text,
+                        displayOnlyPromptAt: displayPrompt?.date,
+                        isRemote: session.map { CmuxRemoteEventIdentity.isRemoteSessionID($0.id) }
+                            ?? false,
+                        workload: workload
+                    )
                     result.append(
-                        LiveSurface(
-                            id: surface.id,
-                            windowID: window.id,
-                            workspaceID: workspace.id,
-                            workspaceTitle: workspace.title ?? workspace.ref ?? "Workspace",
-                            title: surface.title ?? session?.agentDisplayName ?? session?.agent ?? surface.type ?? "Surface",
-                            kind: kind,
-                            url: surface.url.flatMap(URL.init(string:)),
-                            agent: session?.agent ?? session?.agentDisplayName,
-                            sessionID: session?.id,
-                            runtimeState: session.map(runtimeState(for:)) ?? .unknown,
-                            lastSubmittedText: prompt?.text,
-                            lastSubmittedAt: prompt?.date,
-                            displayOnlyPromptText: displayPrompt?.text,
-                            displayOnlyPromptAt: displayPrompt?.date,
-                            isRemote: session.map { CmuxRemoteEventIdentity.isRemoteSessionID($0.id) }
-                                ?? false,
-                            workload: workload
+                        RemoteLiveSurfaceOverlay.apply(
+                            remoteObservation,
+                            to: liveSurface,
+                            hasAuthoritativeCurrentSession: hasAuthoritativeCurrentSession,
+                            hasCachedCurrentSession: hasCachedCurrentSession,
+                            cachedCurrentSessionUpdatedAt: cachedCurrentSessionUpdatedAt,
+                            hasFreshLocalAgentProcess: processWorkloads != nil
+                                && (processWorkload == .codex || processWorkload == .claude),
+                            matchingSurfaceIDs: surfaceIDs
                         )
                     )
                 }
@@ -1074,7 +1251,14 @@ final class CompanionAppModel: ObservableObject {
         sessionsAreAuthoritative: Bool,
         topologyIsStale: Bool
     ) {
-        let surfaceByID = Dictionary(uniqueKeysWithValues: surfaces.map { ($0.id, $0) })
+        let surfaceByID = Dictionary(
+            surfaces.flatMap { surface -> [(String, LiveSurface)] in
+                var entries = [(surface.id, surface)]
+                if let ref = surface.ref { entries.append((ref, surface)) }
+                return entries
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
         let sessionByID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
         let sessionBySurface = CmuxAgentSessionResolver.currentBySurface(sessions)
         let surfaceBySession = Dictionary(
@@ -1086,16 +1270,53 @@ final class CompanionAppModel: ObservableObject {
         for setIndex in sets.indices {
             for memberIndex in sets[setIndex].members.indices {
                 var member = sets[setIndex].members[memberIndex]
-                let live = member.sessionID.flatMap { surfaceBySession[$0] }
-                    ?? member.surfaceID.flatMap { surfaceByID[$0] }
-                let localSession = live?.sessionID.flatMap { sessionByID[$0] }
-                    ?? member.surfaceID.flatMap { sessionBySurface[$0] }
-                let remote = remoteState(matching: member)
+                var live: LiveSurface?
+                if let sessionID = member.sessionID {
+                    live = surfaceBySession[sessionID]
+                }
+                if live == nil, let surfaceID = member.surfaceID {
+                    live = surfaceByID[surfaceID]
+                }
+                var remote = remoteState(matching: member)
+                if remote == nil, let live {
+                    remote = remoteState(
+                        matchingSurfaceIDs: Set([live.id, live.ref].compactMap { $0 })
+                    )
+                }
+                if let observation = remote,
+                   CmuxRemoteLifecycle.isIdentityExpired(
+                       lastSeenAt: observation.lastSeenAt,
+                       now: now
+                   ) {
+                    remote = nil
+                }
+                if live == nil, let sessionID = remote?.sessionID {
+                    live = surfaceBySession[sessionID]
+                }
+                if live == nil, let surfaceID = remote?.surfaceID {
+                    live = surfaceByID[surfaceID]
+                }
+
+                var localSession: CmuxTransportSession?
+                if let sessionID = live?.sessionID {
+                    localSession = sessionByID[sessionID]
+                }
+                if localSession == nil, let surfaceID = member.surfaceID {
+                    localSession = sessionBySurface[surfaceID]
+                }
                 let localState = localSession.map(runtimeState(for:))
-                let localUpdatedAt = localSession?.updatedAtUnix.map(Date.init(timeIntervalSince1970:))
-                let shouldYieldToLocal = (member.isRemote || remote != nil)
+                let localUpdatedAt = localSession?.updatedAtUnix
+                    .map(Date.init(timeIntervalSince1970:))
+                    ?? parsedDate(localSession?.updatedAt)
+                let localSessionIsNonRemote = localSession.map {
+                    !CmuxRemoteEventIdentity.isRemoteSessionID($0.id)
+                } == true
+                let localSessionIsRemote = localSession.map {
+                    CmuxRemoteEventIdentity.isRemoteSessionID($0.id)
+                } == true
+                let authoritativeLocalWins = (member.isRemote || remote != nil)
                     && sessionsAreAuthoritative
-                    && localSession.map { !CmuxRemoteEventIdentity.isRemoteSessionID($0.id) } == true
+                    && localSessionIsNonRemote
                     && localSession.map { session in
                         CmuxRemoteLifecycle.shouldYieldToLocalSession(
                             isActiveForSurface: session.isActiveForSurface,
@@ -1104,34 +1325,72 @@ final class CompanionAppModel: ObservableObject {
                             remoteLastSeenAt: remote?.lastSeenAt ?? member.lastHeartbeatAt
                         )
                     } == true
+                let cachedLocalWins = remote != nil
+                    && !sessionsAreAuthoritative
+                    && localSessionIsNonRemote
+                    && localUpdatedAt.map { remote?.lastSeenAt ?? .distantPast <= $0 } != false
+                let shouldYieldToLocal = authoritativeLocalWins || cachedLocalWins
+                let remoteSessionWins = localSessionIsRemote
+                    && live?.isRemote == true
+                    && localUpdatedAt.map { updatedAt in
+                        remote.map { updatedAt >= $0.lastSeenAt } ?? true
+                    } == true
 
                 if shouldYieldToLocal, let localSession {
                     let oldRemoteSessionID = member.sessionID
-                    let takeoverSurfaceID = localSession.surfaceID ?? live?.id ?? member.surfaceID
+                    let takeoverSurfaceID = live?.id ?? localSession.surfaceID ?? member.surfaceID
                     member.surfaceID = takeoverSurfaceID
-                    member.workspaceID = localSession.workspaceID ?? live?.workspaceID ?? member.workspaceID
+                    member.workspaceID = live?.workspaceID ?? localSession.workspaceID ?? member.workspaceID
                     member.windowID = live?.windowID ?? member.windowID
                     member.sessionID = localSession.id
                     member.agent = localSession.agent ?? live?.agent ?? member.agent
                     member.runtimeState = localState ?? .unknown
                     member.isRemote = false
-                    member.localOwnershipSince = now
+                    member.localOwnershipSince = authoritativeLocalWins
+                        ? now
+                        : localUpdatedAt ?? member.localOwnershipSince ?? now
                     mergeLastSubmitted(latestPrompt(for: localSession, in: feedItems), into: &member)
-                    lastEventByRemoteSession = lastEventByRemoteSession.filter { key, event in
-                        key != oldRemoteSessionID && event.surfaceID != member.surfaceID
+                    if authoritativeLocalWins {
+                        let takeoverSurfaceAliases = live.map {
+                            Set([$0.id, $0.ref].compactMap { $0 })
+                        } ?? member.surfaceID.map { surfaceIdentityAliases(for: $0) } ?? []
+                        lastEventByRemoteSession = lastEventByRemoteSession.filter { key, event in
+                            key != oldRemoteSessionID
+                                && event.surfaceID.map(takeoverSurfaceAliases.contains) != true
+                        }
+                    }
+                } else if remoteSessionWins, let localSession, let live {
+                    let previousSessionID = member.sessionID
+                    member.surfaceID = live.id
+                    member.workspaceID = live.workspaceID ?? localSession.workspaceID
+                        ?? member.workspaceID
+                    member.windowID = live.windowID
+                    member.sessionID = localSession.id
+                    member.agent = localSession.agent ?? localSession.agentDisplayName
+                        ?? live.agent ?? member.agent
+                    member.runtimeState = localState ?? live.runtimeState
+                    member.isRemote = true
+                    member.localOwnershipSince = nil
+                    member.lastHeartbeatAt = localUpdatedAt
+                    mergeLastSubmitted(latestPrompt(for: localSession, in: feedItems), into: &member)
+
+                    let sessionAgent = (localSession.agent ?? localSession.agentDisplayName)?
+                        .lowercased()
+                    let cachedAgent = remote?.source?.lowercased()
+                    if previousSessionID != localSession.id || sessionAgent != cachedAgent {
+                        let aliases = Set([live.id, live.ref].compactMap { $0 })
+                        lastEventByRemoteSession = lastEventByRemoteSession.filter { _, event in
+                            event.surfaceID.map(aliases.contains) != true
+                        }
+                        member.lastRemoteBootID = nil
+                        member.lastRemoteSequence = nil
                     }
                 } else if let remote {
                     // An SSH agent runs inside an otherwise ordinary terminal
                     // surface, so the tree match alone cannot describe its
                     // lifecycle. Preserve topology from the live surface while
-                    // letting authenticated bridge events own agent state.
-                    if let live {
-                        member.surfaceID = live.id
-                        member.workspaceID = live.workspaceID
-                        member.windowID = live.windowID
-                    }
-                    member.surfaceID = remote.surfaceID ?? member.surfaceID
-                    member.workspaceID = remote.workspaceID ?? member.workspaceID
+                    // letting managed bridge events own agent state.
+                    member = RemoteMemberTopology.apply(remote, to: member, liveSurface: live)
                     member.sessionID = remote.sessionID
                     member.agent = remote.source ?? member.agent
                     member.runtimeState = CmuxRemoteLifecycle.stateApplyingLease(
@@ -1158,19 +1417,36 @@ final class CompanionAppModel: ObservableObject {
                         mergeLastSubmitted((text, remote.lastSubmittedAt), into: &member)
                     }
                 } else if member.isRemote {
-                    // The in-memory event cache is intentionally ephemeral.
-                    // After an app restart, keep the persisted remote state for
-                    // its conservative lease window, then degrade deterministically.
+                    // Recent identity telemetry is persisted without prompt
+                    // text. If it is absent or expired, keep linked member
+                    // metadata only through the conservative identity lease.
                     if let live {
                         member.surfaceID = live.id
                         member.workspaceID = live.workspaceID
                         member.windowID = live.windowID
                     }
-                    member.runtimeState = CmuxRemoteLifecycle.stateApplyingLease(
-                        member.runtimeState,
-                        lastSeenAt: member.lastHeartbeatAt,
-                        now: now
-                    )
+                    if treeIsAuthoritative,
+                       live != nil,
+                       CmuxRemoteLifecycle.isIdentityExpired(
+                           lastSeenAt: member.lastHeartbeatAt,
+                           now: now
+                       ) {
+                        // The surface still exists but no managed remote event
+                        // renewed its identity. Treat it as the surviving SSH
+                        // shell; a later SessionStart/UserPromptSubmit can take
+                        // ownership again without losing the surface link.
+                        member.sessionID = live?.sessionID
+                        member.agent = live?.agent
+                        member.runtimeState = live?.runtimeState ?? .ended
+                        member.isRemote = false
+                        member.localOwnershipSince = now
+                    } else {
+                        member.runtimeState = CmuxRemoteLifecycle.stateApplyingLease(
+                            member.runtimeState,
+                            lastSeenAt: member.lastHeartbeatAt,
+                            now: now
+                        )
+                    }
                 } else if let live {
                     member.surfaceID = live.id
                     member.workspaceID = live.workspaceID
@@ -1196,6 +1472,11 @@ final class CompanionAppModel: ObservableObject {
                         live.lastSubmittedText.map { ($0, live.lastSubmittedAt) },
                         into: &member
                     )
+                    if live.isRemote {
+                        member.isRemote = true
+                        member.lastHeartbeatAt = localUpdatedAt
+                        member.localOwnershipSince = nil
+                    }
                     if !member.isRemote,
                        member.localOwnershipSince == nil,
                        member.lastRemoteBootID != nil {
@@ -1576,21 +1857,82 @@ final class CompanionAppModel: ObservableObject {
             .max { $0.receivedAt < $1.receivedAt }
     }
 
-    private func persistedRemoteMember(sessionID: String, surfaceID: String?) -> WorkMember? {
+    private func remoteState(matchingSurfaceIDs surfaceIDs: Set<String>) -> RemoteEventState? {
+        guard !surfaceIDs.isEmpty else { return nil }
+        return lastEventByRemoteSession.values
+            .filter { event in
+                event.surfaceID.map(surfaceIDs.contains) == true
+            }
+            .max { $0.receivedAt < $1.receivedAt }
+    }
+
+    private func knownSurfaceAliasSets() -> [Set<String>] {
+        var result = liveSurfaces.map {
+            Set([$0.id, $0.ref].compactMap { $0 })
+        }
+        if let lastGoodTree {
+            result.append(contentsOf: lastGoodTree.windows.flatMap { window in
+                window.workspaces.flatMap { workspace in
+                    workspace.surfaces.map { surface in
+                        Set([surface.id, surface.ref].compactMap { $0 })
+                    }
+                }
+            })
+        }
+        return result
+    }
+
+    private func canonicalizeRemoteEventSurfaceIDs(using tree: CmuxTreeSnapshot) {
+        var canonicalByAlias: [String: (surfaceID: String, workspaceID: String)] = [:]
+        for window in tree.windows {
+            for workspace in window.workspaces {
+                for surface in workspace.surfaces {
+                    canonicalByAlias[surface.id] = (surface.id, workspace.id)
+                    if let ref = surface.ref {
+                        canonicalByAlias[ref] = (surface.id, workspace.id)
+                    }
+                }
+            }
+        }
+        for key in Array(lastEventByRemoteSession.keys) {
+            guard var state = lastEventByRemoteSession[key],
+                  let surfaceID = state.surfaceID,
+                  let canonical = canonicalByAlias[surfaceID] else { continue }
+            state.surfaceID = canonical.surfaceID
+            state.workspaceID = canonical.workspaceID
+            lastEventByRemoteSession[key] = state
+        }
+    }
+
+    private func surfaceIdentityAliases(for surfaceID: String) -> Set<String> {
+        knownSurfaceAliasSets().first(where: { $0.contains(surfaceID) }) ?? [surfaceID]
+    }
+
+    private func persistedRemoteMember(
+        sessionID: String,
+        surfaceIDs: Set<String>
+    ) -> WorkMember? {
         if let exact = sets.lazy.compactMap({ set in
             set.members.first { $0.isRemote && $0.sessionID == sessionID }
         }).first {
             return exact
         }
-        guard let surfaceID else { return nil }
         return sets.lazy.compactMap { set in
-            set.members.first { $0.isRemote && $0.surfaceID == surfaceID }
+            set.members.first {
+                $0.isRemote && $0.surfaceID.map(surfaceIDs.contains) == true
+            }
         }.first
     }
 
-    private func persistedSurfaceMember(sessionID: String, surfaceID: String) -> WorkMember? {
+    private func persistedSurfaceMember(
+        sessionID: String,
+        surfaceIDs: Set<String>
+    ) -> WorkMember? {
         sets.flatMap(\.members)
-            .filter { $0.sessionID == sessionID || $0.surfaceID == surfaceID }
+            .filter {
+                $0.sessionID == sessionID
+                    || $0.surfaceID.map(surfaceIDs.contains) == true
+            }
             .max {
                 ($0.lastHeartbeatAt ?? .distantPast) < ($1.lastHeartbeatAt ?? .distantPast)
             }
@@ -1598,6 +1940,20 @@ final class CompanionAppModel: ObservableObject {
 
     private func parsedDate(_ value: String?) -> Date? {
         value.flatMap(dateParser.parse)
+    }
+
+    private func persistRemoteEventCache() {
+        guard let data = try? RemoteEventCacheStore.encodedData(
+            for: lastEventByRemoteSession
+        ), data != lastPersistedRemoteCacheData else {
+            return
+        }
+        do {
+            try RemoteEventCacheStore.write(data, to: remoteCacheURL)
+            lastPersistedRemoteCacheData = data
+        } catch {
+            // Telemetry persistence must never make snapshot refresh fail.
+        }
     }
 
     private func paletteColor(for index: Int) -> String {
@@ -1634,7 +1990,7 @@ final class CompanionAppModel: ObservableObject {
     }
 }
 
-private struct RemoteEventState {
+struct RemoteEventState {
     var sessionID: String
     var source: String?
     var surfaceID: String?
@@ -1648,6 +2004,148 @@ private struct RemoteEventState {
     var receivedAt: Date
     /// Mac-side cmux event timestamp, never the remote host's wall clock.
     var lastSeenAt: Date
+}
+
+/// Conservatively enriches a live terminal with lifecycle telemetry received
+/// through the managed `cmux ssh` bridge. A current cmux session remains
+/// authoritative; the overlay exists for remote agents that otherwise look
+/// like an ordinary shell because their process tree lives on another host.
+enum RemoteLiveSurfaceOverlay {
+    static func apply(
+        _ observation: RemoteEventState?,
+        to surface: LiveSurface,
+        hasAuthoritativeCurrentSession: Bool,
+        hasCachedCurrentSession: Bool = false,
+        cachedCurrentSessionUpdatedAt: Date? = nil,
+        hasFreshLocalAgentProcess: Bool = false,
+        matchingSurfaceIDs: Set<String>? = nil,
+        now: Date = Date(),
+        identityExpiresAfter: TimeInterval = CmuxRemoteLifecycle.defaultDisconnectedAfter
+    ) -> LiveSurface {
+        let acceptedSurfaceIDs = matchingSurfaceIDs ?? [surface.id]
+        guard !hasAuthoritativeCurrentSession,
+              !hasFreshLocalAgentProcess,
+              !surface.isBrowser,
+              let observation,
+              !CmuxRemoteLifecycle.isIdentityExpired(
+                  lastSeenAt: observation.lastSeenAt,
+                  now: now,
+                  expiresAfter: identityExpiresAfter
+              ),
+              !hasCachedCurrentSession
+                || (cachedCurrentSessionUpdatedAt.map { observation.lastSeenAt > $0 } == true),
+              observation.surfaceID.map(acceptedSurfaceIDs.contains) == true else {
+            return surface
+        }
+
+        var result = surface
+        let state = CmuxRemoteLifecycle.stateApplyingLease(
+            observation.runtimeState,
+            lastSeenAt: observation.lastSeenAt,
+            now: now
+        )
+        result.agent = observation.source ?? result.agent
+        result.sessionID = observation.sessionID
+        result.runtimeState = state
+        result.isRemote = true
+
+        if let text = observation.lastSubmittedText, !text.isEmpty {
+            result.lastSubmittedText = text
+            result.lastSubmittedAt = observation.lastSubmittedAt
+        }
+
+        if state == .ended {
+            // The SSH terminal is still present, but the remote agent returned
+            // control to its shell. Keep identity metadata for a subsequent
+            // move/link while making the visible workload truthful.
+            result.workload = .shell
+        } else if let source = observation.source {
+            let workload = SurfaceWorkload(agent: source)
+            if workload != .unknown {
+                result.workload = workload
+            }
+        }
+        return result
+    }
+}
+
+enum RemoteEventAdmission {
+    static func source(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ["codex", "claude"].contains(normalized) ? normalized : nil
+    }
+
+    static func surfaceID(
+        identity: CmuxRemoteEventIdentity,
+        frameSurfaceID: String?,
+        payloadSurfaceID: String?,
+        knownSurfaceAliases: [Set<String>] = []
+    ) -> String? {
+        guard payloadSurfaceID == nil || payloadSurfaceID == identity.surfaceID else {
+            return nil
+        }
+        let claimedSurfaceID = payloadSurfaceID ?? identity.surfaceID
+        guard let frameSurfaceID else { return claimedSurfaceID }
+        if frameSurfaceID == claimedSurfaceID { return claimedSurfaceID }
+
+        // cmux may expose the transport envelope as a canonical UUID while
+        // the injected terminal environment uses the equivalent `surface:N`
+        // ref. Accept that pair only when the current tree proves the alias.
+        guard knownSurfaceAliases.contains(where: {
+            $0.contains(frameSurfaceID) && $0.contains(claimedSurfaceID)
+        }) else {
+            return nil
+        }
+        return frameSurfaceID
+    }
+}
+
+enum RemoteEventCachePolicy {
+    static let maximumEntries = 256
+    static let maximumAge: TimeInterval = 24 * 60 * 60
+
+    static func retained(
+        _ states: [String: RemoteEventState],
+        now: Date,
+        liveSurfaceIDs: Set<String>? = nil
+    ) -> [String: RemoteEventState] {
+        let eligible = states.filter { _, state in
+            let age = max(0, now.timeIntervalSince(state.receivedAt))
+            guard age <= maximumAge else { return false }
+            guard let liveSurfaceIDs else { return true }
+            return state.surfaceID.map(liveSurfaceIDs.contains) == true
+        }
+        guard eligible.count > maximumEntries else { return eligible }
+        return Dictionary(
+            uniqueKeysWithValues: eligible
+                .sorted { $0.value.receivedAt > $1.value.receivedAt }
+                .prefix(maximumEntries)
+                .map { ($0.key, $0.value) }
+        )
+    }
+}
+
+enum RemoteMemberTopology {
+    static func apply(
+        _ observation: RemoteEventState,
+        to member: WorkMember,
+        liveSurface: LiveSurface?
+    ) -> WorkMember {
+        var result = member
+        if let liveSurface {
+            // The tree UUID is the canonical persisted identity. Bridge events
+            // may carry a short `surface:1`/`workspace:1` ref; keeping that ref
+            // would make one terminal appear both linked and unlinked.
+            result.surfaceID = liveSurface.id
+            result.workspaceID = liveSurface.workspaceID
+            result.windowID = liveSurface.windowID
+        } else {
+            result.surfaceID = observation.surfaceID ?? result.surfaceID
+            result.workspaceID = observation.workspaceID ?? result.workspaceID
+        }
+        return result
+    }
 }
 
 private struct NotificationFingerprint: Equatable {

@@ -50,18 +50,18 @@ To produce the two assets required by the in-app updater, set the release
 version and monotonically increasing build number, then run:
 
 ```bash
-CMUX_COMPANION_VERSION=0.1.6 \
-CMUX_COMPANION_BUILD_NUMBER=7 \
+CMUX_COMPANION_VERSION=0.1.7 \
+CMUX_COMPANION_BUILD_NUMBER=8 \
 ./scripts/package-release.sh
 ```
 
 The helper rebuilds the app, sanitizes metadata, creates the ZIP and SHA-256
 sidecar under `dist/release/`, then extracts and verifies the result. For a tag
-named `v0.1.6`, upload both assets without renaming them:
+named `v0.1.7`, upload both assets without renaming them:
 
 ```text
-CmuxCompanion-v0.1.6-macos-arm64.zip
-CmuxCompanion-v0.1.6-macos-arm64.zip.sha256
+CmuxCompanion-v0.1.7-macos-arm64.zip
+CmuxCompanion-v0.1.7-macos-arm64.zip.sha256
 ```
 
 These names are exact: the updater ignores a release if either asset is absent
@@ -103,6 +103,17 @@ remove only the Companion association—the cmux terminal or browser remains
 open and returns to the unlinked tray when it is still live. The `연결` menus
 remain available for keyboard and assistive-technology use.
 
+The fixed search field accepts set, group, workspace, terminal, and agent
+names. Searching a terminal keeps every destination set visible; searching a
+set or group keeps the source tray visible, so filtering never removes the
+other half of a drag-and-drop registration.
+
+The gear menu provides compact/default/large presets plus width and height
+sliders. The chosen popover size is restored after relaunch and clamped to the
+current screen when opened. To reposition the menu-bar item, hold Command and
+drag the Companion icon left or right; AppKit does not expose a supported API
+for assigning an exact status-item coordinate.
+
 Each set's `…` menu opens a 16-color quick palette and a native macOS custom
 color picker. Custom colors are stored with the set as `#RRGGBB`, so they
 survive restarts and remain compatible with existing saved data.
@@ -115,6 +126,13 @@ zsh/fish because the public cmux tree does not expose that foreground process.
 Remote hook-owned agents add a `Remote` suffix. If the sessions snapshot is
 temporarily unavailable, Companion retains the last known agent or shows
 `Unknown` instead of incorrectly switching the card to `Shell`.
+
+Remote bridge events also enrich unlinked live terminal cards before they are
+assigned to a set. A current local agent session still wins, while an agent
+that emits `SessionEnd` (including Claude) returns the surviving SSH terminal
+to `Shell`. Codex currently has no `SessionEnd` hook, so its last `Stop` state
+expires back to `Shell` after the remote identity lease unless an optional
+shell-exit detector is installed later.
 
 ## Updates
 
@@ -164,9 +182,11 @@ default; set `CMUX_COMPANION_CAPTURE_SHELL=0` to disable capture.
 
 ## Remote tracking
 
-Use `cmux ssh`, which injects the cmux surface identity and provides an
-authenticated reverse relay. Plain `ssh` can be used to copy the installer,
-but it does not provide tracking by itself. From the Mac checkout, copy both
+Use `cmux ssh`, which creates a managed remote workspace, injects the cmux
+surface identity, and provides a reverse relay. Plain `ssh` can be used to copy
+the installer, but an existing ordinary SSH surface does not provide tracking
+by itself. Preserving such a surface would require a separate per-session
+reverse tunnel and authentication helper. From the Mac checkout, copy both
 scripts to each remote host:
 
 ```bash
@@ -175,15 +195,25 @@ scp scripts/remote-hook-bridge.sh scripts/install-remote-hooks.sh \
   host:~/cmux-companion-hooks/
 ```
 
-Then enter the working shell through cmux and install as the normal remote
-agent user (never with `sudo`):
+Create the managed workspace from the Mac (the command returns after opening
+and focusing a new cmux workspace):
 
 ```bash
 cmux ssh host
+```
+
+In that newly opened **remote cmux workspace**, install as the normal remote
+agent user (never with `sudo`):
+
+```bash
 cd ~/cmux-companion-hooks
 chmod +x remote-hook-bridge.sh install-remote-hooks.sh
 ./install-remote-hooks.sh --install
 ```
+
+For a host that already has an older Companion-managed bridge, use
+`./install-remote-hooks.sh --update-managed` instead. Both modes refuse to
+overwrite unrelated files.
 
 Python 3.8 or newer and the `cmux` relay CLI must be available on the remote
 host. The installer creates only managed files under `~/.local`, refuses
@@ -253,12 +283,20 @@ recorded without prompt contents in
 
 Remote hooks are edge-triggered rather than a continuous process probe. A
 `running` or `unknown` member therefore remains healthy through 15 minutes of
-hook silence, becomes `stale` after that, and becomes `disconnected` after 60
-minutes. Explicit `waiting`, `idle`, `ended`, and `error` states are preserved
-until another real lifecycle hook changes them; transport age never overwrites
-those outcomes.
+hook silence and becomes `stale` after that. The remote agent identity has a
+hard 60-minute lease for every state so a Codex `Stop` cannot permanently
+relabel a shell after the CLI exits. A managed heartbeat refreshes an existing
+identity only; it never creates a Codex/Claude identity in an ordinary shell.
+Use a heartbeat for long-running work or approval waits that may exceed the
+lease.
 
-For a one-shot connectivity check and verbose diagnosis:
+For a one-shot relay check that does not change Companion state:
+
+```bash
+test -x "$CMUX_BUNDLED_CLI_PATH" && "$CMUX_BUNDLED_CLI_PATH" ping
+```
+
+For verbose hook-delivery diagnosis after a real agent identity exists:
 
 ```bash
 printf '{}' | CMUX_COMPANION_HOOK_DEBUG=1 \
@@ -279,15 +317,21 @@ State is stored locally under:
 ```text
 ~/Library/Application Support/CmuxCompanion/
 ├── sets.json
+├── remote-events.json
 └── commands/
 ```
 
 Last-prompt and optional shell-command previews may contain sensitive text.
-Remote prompts cross the authenticated `cmux ssh` reverse relay and are then
-stored on the Mac; the remote diagnostic log stores only operational failure
-metadata. Prompt previews are enabled by default and can be disabled from the
-Companion menu; lock-screen visibility follows the user's macOS notification
-settings.
+`remote-events.json` retains only bounded recent agent/surface identity and
+lifecycle metadata so unlinked remote cards survive an app restart; prompt
+text is deliberately excluded from this cache.
+Remote prompts cross the `cmux ssh` reverse relay and are then stored on the
+Mac; the remote diagnostic log stores only operational failure metadata. The
+relay authenticates transport, not the producing agent: another process owned
+by the same remote user with relay access can submit display telemetry, though
+Companion never forwards approval decisions. Prompt previews are enabled by
+default and can be disabled from the Companion menu; lock-screen visibility
+follows the user's macOS notification settings.
 
 ## Development
 

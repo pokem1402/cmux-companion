@@ -5,12 +5,25 @@ import CmuxCompanionCore
 struct CompanionRootView: View {
     @ObservedObject var model: CompanionAppModel
     @ObservedObject var updater: AppUpdateController
+    @ObservedObject var layout: PopoverLayoutSettings
     @State private var showHookConfirmation = false
     @State private var showUpdateConfirmation = false
+    @State private var showSettings = false
+    @State private var searchText = ""
+
+    private var searchResults: CompanionSearchResults {
+        CompanionSearch.results(
+            sets: model.sets,
+            unlinkedSurfaces: model.unlinkedSurfaces,
+            allLiveSurfaces: model.liveSurfaces,
+            query: searchText
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
+            searchBar
             Divider()
 
             ScrollView {
@@ -29,12 +42,22 @@ struct CompanionRootView: View {
 
                     if model.sets.isEmpty {
                         emptyState
+                    } else if !searchResults.hasAnyMatch {
+                        searchEmptyState
                     } else {
-                        ForEach(model.sets) { set in
+                        ForEach(searchResults.sets) { set in
                             SetCardView(
                                 model: model,
                                 set: set,
-                                evaluation: model.evaluations[set.id] ?? SetEvaluator.evaluate(set)
+                                evaluation: model.evaluations[set.id] ?? SetEvaluator.evaluate(set),
+                                forceExpanded: searchResults.isActive
+                                    && searchResults.matchingSetIDs.contains(set.id)
+                            )
+                            .opacity(
+                                searchResults.isActive
+                                    && !searchResults.matchingSetIDs.contains(set.id)
+                                    ? 0.58
+                                    : 1
                             )
                         }
                     }
@@ -46,7 +69,7 @@ struct CompanionRootView: View {
 
             if !model.unlinkedSurfaces.isEmpty {
                 Divider()
-                unlinkedTray
+                unlinkedTray(surfaces: searchResults.unlinkedSurfaces)
             }
 
             if model.hasLinkedDraggableItems {
@@ -59,7 +82,7 @@ struct CompanionRootView: View {
             Divider()
             footer
         }
-        .frame(width: 430, height: 640)
+        .frame(width: layout.width, height: layout.height)
         .background(Color(nsColor: .windowBackgroundColor))
         .confirmationDialog(
             "cmux Agent hooks를 설치할까요?",
@@ -143,8 +166,44 @@ struct CompanionRootView: View {
             }
             .buttonStyle(.borderless)
             .help("새로고침")
+            Button {
+                showSettings.toggle()
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.borderless)
+            .help("화면 및 메뉴바 설정")
+            .popover(isPresented: $showSettings, arrowEdge: .top) {
+                CompanionSettingsView(layout: layout)
+            }
         }
         .padding(12)
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("세트 · 그룹 · workspace · shell 검색", text: $searchText)
+                .textFieldStyle(.plain)
+                .onExitCommand { searchText = "" }
+                .accessibilityLabel("세트, 그룹, workspace 또는 shell 검색")
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("검색 지우기")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 12)
+        .padding(.bottom, 10)
     }
 
     @ViewBuilder
@@ -292,6 +351,20 @@ struct CompanionRootView: View {
         .padding(.vertical, 22)
     }
 
+    private var searchEmptyState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 26))
+                .foregroundStyle(.secondary)
+            Text("일치하는 세트나 창이 없습니다")
+                .font(.headline)
+            Button("검색 지우기") { searchText = "" }
+                .buttonStyle(.link)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
+    }
+
     private var createSetRow: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -315,7 +388,7 @@ struct CompanionRootView: View {
     /// Keep drag sources visible while the independent set list scrolls. With
     /// up to three surfaces the tray needs no scrolling; larger sessions use a
     /// small local scroll instead of making the source disappear below sets.
-    private var unlinkedTray: some View {
+    private func unlinkedTray(surfaces: [LiveSurface]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Label("연결되지 않은 cmux 창", systemImage: "rectangle.stack.badge.plus")
@@ -325,14 +398,27 @@ struct CompanionRootView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    ForEach(model.unlinkedSurfaces) { surface in
-                        UnlinkedSurfaceRow(model: model, surface: surface)
+            if surfaces.isEmpty {
+                HStack {
+                    Text("검색과 일치하는 연결되지 않은 창이 없습니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("지우기") { searchText = "" }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+                .padding(.vertical, 6)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        ForEach(surfaces) { surface in
+                            UnlinkedSurfaceRow(model: model, surface: surface)
+                        }
                     }
                 }
+                .frame(height: min(CGFloat(surfaces.count) * 51, 153))
             }
-            .frame(height: min(CGFloat(model.unlinkedSurfaces.count) * 51, 153))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
@@ -371,10 +457,84 @@ struct CompanionRootView: View {
     }
 }
 
+private struct CompanionSettingsView: View {
+    @ObservedObject var layout: PopoverLayoutSettings
+
+    private var widthBinding: Binding<Double> {
+        Binding(
+            get: { Double(layout.width) },
+            set: { layout.setWidth(CGFloat($0)) }
+        )
+    }
+
+    private var heightBinding: Binding<Double> {
+        Binding(
+            get: { Double(layout.height) },
+            set: { layout.setHeight(CGFloat($0)) }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            Text("화면 설정")
+                .font(.headline)
+
+            HStack(spacing: 7) {
+                ForEach(PopoverSizePreset.allCases) { preset in
+                    Button(preset.label) { layout.apply(preset) }
+                        .controlSize(.small)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text("너비")
+                    Spacer()
+                    Text("\(Int(layout.width)) pt")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(
+                    value: widthBinding,
+                    in: Double(PopoverLayoutMetrics.minimumSize.width)...Double(layout.screenMaximumSize.width),
+                    step: 10
+                )
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text("높이")
+                    Spacer()
+                    Text("\(Int(layout.height)) pt")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(
+                    value: heightBinding,
+                    in: Double(PopoverLayoutMetrics.minimumSize.height)...Double(layout.screenMaximumSize.height),
+                    step: 10
+                )
+            }
+
+            Divider()
+
+            Label("상단 메뉴바 위치", systemImage: "menubar.rectangle")
+                .font(.subheadline.weight(.semibold))
+            Text("⌘ 키를 누른 채 Cmux Companion 아이콘을 좌우로 드래그하면 위치를 옮길 수 있습니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(width: 300)
+    }
+}
+
 private struct SetCardView: View {
     @ObservedObject var model: CompanionAppModel
     let set: WorkSet
     let evaluation: SetEvaluation
+    var forceExpanded = false
     @State private var isExpanded = true
     @State private var isRenaming = false
     @State private var editedName = ""
@@ -389,13 +549,15 @@ private struct SetCardView: View {
         return evaluation.status.displayName
     }
 
+    private var isEffectivelyExpanded: Bool { forceExpanded || isExpanded }
+
     var body: some View {
         VStack(spacing: 0) {
             header
             RoleDropStrip(model: model, set: set)
                 .padding(.horizontal, 11)
                 .padding(.bottom, 8)
-            if isExpanded {
+            if isEffectivelyExpanded {
                 Divider().padding(.leading, 12)
                 content
             }
@@ -427,7 +589,7 @@ private struct SetCardView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Button { isExpanded.toggle() } label: {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                Image(systemName: isEffectivelyExpanded ? "chevron.down" : "chevron.right")
                     .font(.caption.weight(.semibold))
             }
             .buttonStyle(.plain)

@@ -18,26 +18,36 @@ enum MenuBarStatusLayout {
 
 @MainActor
 final class MenuBarController {
+    private static let statusItemAutosaveName = "dev.cmuxcompanion.app.mainStatusItem"
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private let model: CompanionAppModel
     private let updater: AppUpdateController
+    private let layout: PopoverLayoutSettings
     private var cancellables: Set<AnyCancellable> = []
 
     /// Kept internal so the app self-test can guard the real AppKit anchor,
     /// rather than only testing the value supplied by the layout helper.
     var statusItemLengthForTesting: CGFloat { statusItem.length }
     var statusItemTitleForTesting: String { statusItem.button?.title ?? "" }
+    var statusItemAutosaveNameForTesting: String? { statusItem.autosaveName }
+    var popoverSizeForTesting: NSSize { popover.contentSize }
 
-    init(model: CompanionAppModel, updater: AppUpdateController) {
+    init(
+        model: CompanionAppModel,
+        updater: AppUpdateController,
+        layout: PopoverLayoutSettings
+    ) {
         self.model = model
         self.updater = updater
+        self.layout = layout
         self.statusItem = NSStatusBar.system.statusItem(withLength: MenuBarStatusLayout.itemLength)
+        statusItem.autosaveName = Self.statusItemAutosaveName
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 430, height: 640)
+        popover.contentSize = layout.size
         popover.contentViewController = NSHostingController(
-            rootView: CompanionRootView(model: model, updater: updater)
+            rootView: CompanionRootView(model: model, updater: updater, layout: layout)
         )
 
         if let button = statusItem.button {
@@ -57,6 +67,11 @@ final class MenuBarController {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 DispatchQueue.main.async { self?.updateStatusItem() }
+            }
+            .store(in: &cancellables)
+        layout.$size
+            .sink { [weak self] size in
+                self?.popover.contentSize = size
             }
             .store(in: &cancellables)
         updateStatusItem()
@@ -79,6 +94,15 @@ final class MenuBarController {
     }
 
     private func presentPopover(relativeTo button: NSStatusBarButton) {
+        if let visibleFrame = button.window?.screen?.visibleFrame {
+            layout.updateScreenMaximum(
+                maximumWidth: visibleFrame.width - 40,
+                maximumHeight: visibleFrame.height - 40
+            )
+        }
+        // Apply the effective screen-clamped size before showing; waiting for
+        // a Combine delivery here would let an oversized old frame flash once.
+        popover.contentSize = layout.size
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()

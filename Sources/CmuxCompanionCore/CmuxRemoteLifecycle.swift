@@ -7,6 +7,20 @@ public enum CmuxRemoteLifecycle {
     public static let defaultStaleAfter: TimeInterval = 15 * 60
     public static let defaultDisconnectedAfter: TimeInterval = 60 * 60
 
+    /// A remote hook cannot prove that its agent process still owns the SSH
+    /// terminal forever. This hard identity lease prevents an idle Codex
+    /// session (which has no SessionEnd hook) from permanently relabeling a
+    /// shell after the CLI exits. Long-lived sessions can renew it with the
+    /// managed heartbeat.
+    public static func isIdentityExpired(
+        lastSeenAt: Date?,
+        now: Date = Date(),
+        expiresAfter: TimeInterval = defaultDisconnectedAfter
+    ) -> Bool {
+        guard let lastSeenAt else { return true }
+        return max(0, now.timeIntervalSince(lastSeenAt)) > max(0, expiresAfter)
+    }
+
     /// Resolves a remote hook into a lifecycle state. Heartbeats only prove
     /// connectivity; they must never invent `running` or erase a waiting/idle
     /// state reported by a real agent hook.

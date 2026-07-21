@@ -9,13 +9,15 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var hud: TopHUDController!
     private var notifications: NotificationCoordinator!
     private var updater: AppUpdateController!
+    private var popoverLayout: PopoverLayoutSettings!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
         model = CompanionAppModel()
         updater = AppUpdateController()
-        menuBar = MenuBarController(model: model, updater: updater)
+        popoverLayout = PopoverLayoutSettings()
+        menuBar = MenuBarController(model: model, updater: updater, layout: popoverLayout)
         pet = FloatingPetController()
         hud = TopHUDController()
         notifications = NotificationCoordinator()

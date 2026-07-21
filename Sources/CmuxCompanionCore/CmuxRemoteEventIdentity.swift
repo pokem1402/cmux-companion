@@ -28,9 +28,34 @@ public struct CmuxRemoteEventIdentity: Equatable, Sendable {
             return nil
         }
         let suffix = sessionID.dropFirst(marker.count)
-        guard let encodedSurface = suffix.split(separator: ":", maxSplits: 1).first,
-              !encodedSurface.isEmpty else { return nil }
-        surfaceID = String(encodedSurface)
+        if suffix.hasPrefix("v2:") {
+            let encodedAndNativeSession = suffix.dropFirst(3)
+            guard let separator = encodedAndNativeSession.firstIndex(of: ":") else {
+                return nil
+            }
+            let encodedSurface = String(encodedAndNativeSession[..<separator])
+            let nativeSession = encodedAndNativeSession[encodedAndNativeSession.index(after: separator)...]
+            guard !encodedSurface.isEmpty,
+                  !nativeSession.isEmpty,
+                  let decodedSurface = encodedSurface.removingPercentEncoding,
+                  !decodedSurface.isEmpty else { return nil }
+            surfaceID = decodedSurface
+        } else {
+            // Legacy bridge sessions did not escape `:` in a short ref such as
+            // `surface:1`. Recover the full value from the managed payload when
+            // available, while retaining UUID/session compatibility.
+            let declaredSurface = payload.firstString(forKeys: [
+                "surface_id", "surfaceId", "panel_id"
+            ])
+            if let declaredSurface,
+               suffix.hasPrefix("\(declaredSurface):") {
+                surfaceID = declaredSurface
+            } else {
+                guard let encodedSurface = suffix.split(separator: ":", maxSplits: 1).first,
+                      !encodedSurface.isEmpty else { return nil }
+                surfaceID = String(encodedSurface)
+            }
+        }
 
         originalHookName = payload.firstString(forKeys: [
             "_cmux_companion_original_event", "_remote_original_event"

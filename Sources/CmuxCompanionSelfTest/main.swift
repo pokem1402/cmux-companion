@@ -731,15 +731,23 @@ private func testGUIProcessEnvironment(root: URL) throws {
 private func testRemoteEventIdentity() throws {
     let payload = try CmuxJSON.decode(#"{"tool_name":"cmux-companion-remote-event:PermissionRequest","_opencode_request_id":"cmux-companion-seq:boot-1:42:event"}"#)
     let identity = CmuxRemoteEventIdentity(
-        sessionID: "cmux-remote:surface-1:native-session",
+        sessionID: "cmux-remote:v2:surface%3A1:native-session",
         payload: payload
     )
-    try require(identity?.surfaceID == "surface-1", "remote session must expose its cmux surface")
+    try require(identity?.surfaceID == "surface:1", "remote session must expose its cmux surface")
     try require(identity?.originalHookName == "PermissionRequest", "remote carrier must restore original hook")
     try require(identity?.order == CmuxRemoteEventOrder(bootID: "boot-1", sequence: 42), "remote sequence must decode")
     try require(
         CmuxRemoteEventIdentity(sessionID: "local-session", payload: payload) == nil,
         "local agent events must never be treated as remote"
+    )
+    try require(
+        CmuxRemoteEventIdentity(sessionID: "cmux-remote:v2:", payload: payload) == nil
+            && CmuxRemoteEventIdentity(
+                sessionID: "cmux-remote:v2:surface%3A1",
+                payload: payload
+            ) == nil,
+        "malformed v2 remote sessions must never fall back to legacy parsing"
     )
 }
 

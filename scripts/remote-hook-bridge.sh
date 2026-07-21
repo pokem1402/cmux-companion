@@ -1,5 +1,5 @@
 #!/bin/sh
-# cmux-companion-managed-remote-hook v2
+# cmux-companion-managed-remote-hook v3
 #
 # Telemetry-only bridge for agent hooks running inside a `cmux ssh` shell.
 # It deliberately uses the remote `cmux` relay CLI. It never opens, copies, or
@@ -158,6 +158,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import uuid
 
 MAX_STDIN_BYTES = 512 * 1024
@@ -328,10 +329,12 @@ native_session = (
     or "%s:%s" % (host, source)
 )
 native_session = limited_identifier(native_session, "%s:%s" % (host, source))
-if native_session.startswith("cmux-remote:%s:" % surface) or native_session.startswith("remote:%s:" % surface):
+encoded_surface = urllib.parse.quote(str(surface), safe="")
+managed_session_prefix = "cmux-remote:v2:%s:" % encoded_surface
+if native_session.startswith(managed_session_prefix):
     session = native_session
 else:
-    session = "cmux-remote:%s:%s" % (surface, native_session)
+    session = "%s%s" % (managed_session_prefix, native_session)
 
 native_tool_name = native.get("tool_name") or native.get("toolName")
 marker_needed = is_actionable_telemetry or original_hook_name == "Heartbeat"

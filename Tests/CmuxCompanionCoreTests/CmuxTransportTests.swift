@@ -433,12 +433,26 @@ final class CmuxTransportTests: XCTestCase {
     func testRemoteEventIdentityRejectsLocalSessionsAndDecodesCarrier() throws {
         let payload = try CmuxJSON.decode(#"{"tool_name":"cmux-companion-remote-event:PermissionRequest","_opencode_request_id":"cmux-companion-seq:boot-1:42:event"}"#)
         let identity = try XCTUnwrap(CmuxRemoteEventIdentity(
-            sessionID: "cmux-remote:surface-1:native-session",
+            sessionID: "cmux-remote:v2:surface%3A1:native-session",
             payload: payload
         ))
-        XCTAssertEqual(identity.surfaceID, "surface-1")
+        XCTAssertEqual(identity.surfaceID, "surface:1")
         XCTAssertEqual(identity.originalHookName, "PermissionRequest")
         XCTAssertEqual(identity.order, CmuxRemoteEventOrder(bootID: "boot-1", sequence: 42))
+
+        let legacyPayload = try CmuxJSON.decode(#"{"surface_id":"surface:1","_opencode_request_id":"cmux-companion-seq:boot-1:43:event"}"#)
+        XCTAssertEqual(
+            CmuxRemoteEventIdentity(
+                sessionID: "cmux-remote:surface:1:native-session",
+                payload: legacyPayload
+            )?.surfaceID,
+            "surface:1"
+        )
+        XCTAssertNil(CmuxRemoteEventIdentity(sessionID: "cmux-remote:v2:", payload: payload))
+        XCTAssertNil(CmuxRemoteEventIdentity(
+            sessionID: "cmux-remote:v2:surface%3A1",
+            payload: payload
+        ))
         XCTAssertNil(CmuxRemoteEventIdentity(sessionID: "local-session", payload: payload))
     }
 

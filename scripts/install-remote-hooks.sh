@@ -387,11 +387,13 @@ hook_event_name, add an explicit event, for example:
 Remote permission/question events are status-only telemetry. Approve or answer
 them in the original remote agent terminal; the Companion never replies to them.
 
-For one optional heartbeat tick (an agent-owned cadence below 15 minutes keeps
-running/unknown state inside the healthy lease):
+For one optional heartbeat tick after a real agent identity already exists (an
+agent-owned cadence below 15 minutes keeps long-running work inside the healthy
+lease; a heartbeat never creates a new identity by itself):
   printf '{}' | cmux-companion-remote-codex-hook --heartbeat
 
 Diagnostics:
+  test -x "$CMUX_BUNDLED_CLI_PATH" && "$CMUX_BUNDLED_CLI_PATH" ping
   CMUX_COMPANION_HOOK_DEBUG=1 cmux-companion-remote-codex-hook --heartbeat </dev/null
   tail ~/.local/state/cmux-companion/remote-hook-errors.log
 EOF
