@@ -241,6 +241,44 @@ final class CmuxTransportTests: XCTestCase {
         )
     }
 
+    func testSSHSurfacesUseConservativeRemoteScreenEvidence() throws {
+        let tsv = [
+            "0.1\t100\t4\tsurface\tsurface-claude\tpane-1\tclaude-reviewer",
+            "0.0\t10\t1\tprocess\t40\tsurface-claude\tzsh",
+            "0.0\t10\t1\tprocess\t41\t40\tssh",
+            "0.1\t100\t4\tsurface\tsurface-codex\tpane-1\tcodex-reviewer",
+            "0.0\t10\t1\tprocess\t50\tsurface-codex\tzsh",
+            "0.0\t10\t1\tprocess\t51\t50\tssh",
+            "0.1\t100\t4\tsurface\tsurface-shell\tpane-1\told-claude-title",
+            "0.0\t10\t1\tprocess\t60\tsurface-shell\tzsh",
+            "0.0\t10\t1\tprocess\t61\t60\tssh",
+        ].joined(separator: "\n")
+
+        let snapshot = try CmuxTopSnapshot(tsv: tsv)
+        XCTAssertEqual(snapshot.remoteProbeSurfaceIDs, [
+            "surface-claude", "surface-codex", "surface-shell",
+        ])
+        XCTAssertEqual(snapshot.workload(forSurfaceID: "surface-claude"), .shell)
+
+        let classified = snapshot.addingRemoteScreenEvidence([
+            "surface-claude": """
+                Tip: Run claude --continue or claude --resume to resume a conversation
+                ⏵⏵ auto mode on (shift+tab to cycle)
+                """,
+            "surface-codex": """
+                › Implement {feature}
+                gpt-5.6-sol xhigh fast · ~/workspace/project
+                """,
+            "surface-shell": "gpt-5.6 · ~/workspace/project · shift+tab to cycle",
+            "not-an-ssh-surface": "gpt-5.6 · ~/workspace/project",
+        ])
+
+        XCTAssertEqual(classified.workload(forSurfaceID: "surface-claude"), .claude)
+        XCTAssertEqual(classified.workload(forSurfaceID: "surface-codex"), .codex)
+        XCTAssertEqual(classified.workload(forSurfaceID: "surface-shell"), .shell)
+        XCTAssertNil(classified.workload(forSurfaceID: "not-an-ssh-surface"))
+    }
+
     func testInactiveSessionCanSupplyPromptDisplayButNotCurrentOwnership() throws {
         let top = try CmuxTopSnapshot(tsv: [
             "0.1\t100\t2\tsurface\tsurface-1\tpane-1\tCodex",
@@ -355,6 +393,36 @@ final class CmuxTransportTests: XCTestCase {
             CmuxSnapshotLoader.feedArguments,
             CmuxSnapshotLoader.notificationsArguments
         ]))
+    }
+
+    func testSnapshotLoaderReadsOnlySSHScreenCandidates() async throws {
+        let topTSV = [
+            "0.1\t100\t2\tsurface\tremote-surface\tpane-1\tRemote",
+            "0.0\t10\t1\tprocess\t40\tremote-surface\tzsh",
+            "0.0\t10\t1\tprocess\t41\t40\tssh",
+            "0.1\t100\t1\tsurface\tlocal-surface\tpane-1\tLocal",
+            "0.1\t90\t1\tprocess\t42\tlocal-surface\tcodex",
+        ].joined(separator: "\n")
+        let screenArguments = CmuxSnapshotLoader.remoteScreenArguments(
+            surfaceID: "remote-surface"
+        )
+        let runner = FakeCommandRunner(responses: [
+            CmuxSnapshotLoader.treeArguments: .success(#"{"windows":[]}"#),
+            CmuxSnapshotLoader.sessionsArguments: .success(#"{"sessions":[]}"#),
+            CmuxSnapshotLoader.topArguments: .success(topTSV),
+            CmuxSnapshotLoader.feedArguments: .success(#"{"items":[]}"#),
+            CmuxSnapshotLoader.notificationsArguments: .success("[]"),
+            screenArguments: .success("gpt-5.6-sol xhigh · ~/remote/project"),
+        ])
+
+        let snapshot = await CmuxSnapshotLoader(runner: runner).load()
+
+        XCTAssertEqual(snapshot.top.value?.workload(forSurfaceID: "remote-surface"), .codex)
+        XCTAssertEqual(snapshot.top.value?.workload(forSurfaceID: "local-surface"), .codex)
+        XCTAssertTrue(runner.recordedArguments.contains(screenArguments))
+        XCTAssertFalse(runner.recordedArguments.contains(
+            CmuxSnapshotLoader.remoteScreenArguments(surfaceID: "local-surface")
+        ))
     }
 
     func testOptionalTopFailureDoesNotDegradeHealthyCmuxSnapshot() async throws {

@@ -521,6 +521,30 @@ private func testTransportNormalization() throws {
         "shell-only process surfaces must classify as Shell"
     )
 
+    let sshTSV = [
+        "0.0\t20\t2\tsurface\tremote-claude\tpane-1\tRemote",
+        "0.0\t10\t1\tprocess\t51\tremote-claude\tzsh",
+        "0.0\t10\t1\tprocess\t52\t51\tssh",
+        "0.0\t20\t2\tsurface\tremote-codex\tpane-1\tRemote",
+        "0.0\t10\t1\tprocess\t61\tremote-codex\tzsh",
+        "0.0\t10\t1\tprocess\t62\t61\tssh",
+    ].joined(separator: "\n")
+    let sshTop = try CmuxTopSnapshot(tsv: sshTSV).addingRemoteScreenEvidence([
+        "remote-claude": "Run claude --continue or claude --resume\nshift+tab to cycle",
+        "remote-codex": "› Implement {feature}\ngpt-5.6-sol xhigh · ~/remote/project",
+    ])
+    try require(
+        sshTop.workload(forSurfaceID: "remote-claude") == .claude
+            && sshTop.workload(forSurfaceID: "remote-codex") == .codex,
+        "SSH surfaces must classify from conservative remote terminal UI evidence"
+    )
+    try require(
+        CmuxSnapshotLoader.remoteScreenArguments(surfaceID: "remote-codex") == [
+            "read-screen", "--surface", "remote-codex", "--lines", "16",
+        ],
+        "remote screen probes must stay surface-scoped and bounded"
+    )
+
     let inactivePromptSessions = CmuxSessionsSnapshot(raw: try CmuxJSON.decode(#"""
     {"sessions":[
       {"session_id":"prompt-session","surface_id":"surface-codex","pid":42,

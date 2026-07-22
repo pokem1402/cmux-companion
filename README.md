@@ -51,18 +51,18 @@ To produce the two assets required by the in-app updater, set the release
 version and monotonically increasing build number, then run:
 
 ```bash
-CMUX_COMPANION_VERSION=0.1.9 \
-CMUX_COMPANION_BUILD_NUMBER=10 \
+CMUX_COMPANION_VERSION=0.1.10 \
+CMUX_COMPANION_BUILD_NUMBER=11 \
 ./scripts/package-release.sh
 ```
 
 The helper rebuilds the app, sanitizes metadata, creates the ZIP and SHA-256
 sidecar under `dist/release/`, then extracts and verifies the result. For a tag
-named `v0.1.9`, upload both assets without renaming them:
+named `v0.1.10`, upload both assets without renaming them:
 
 ```text
-CmuxCompanion-v0.1.9-macos-arm64.zip
-CmuxCompanion-v0.1.9-macos-arm64.zip.sha256
+CmuxCompanion-v0.1.10-macos-arm64.zip
+CmuxCompanion-v0.1.10-macos-arm64.zip.sha256
 ```
 
 These names are exact: the updater ignores a release if either asset is absent
@@ -143,8 +143,12 @@ survive restarts and remain compatible with existing saved data.
 Terminal cards show the current surface workload as a small badge. Active cmux
 sessions are normalized to `Codex`, `Claude`, or the original name for another
 agent. A live terminal with an authoritative sessions snapshot and no active
-agent is shown as `Shell`; the label intentionally does not guess Bash versus
-zsh/fish because the public cmux tree does not expose that foreground process.
+agent is shown as `Shell`. For an SSH surface, the local process tree ends at
+`ssh`, so Companion checks only the last visible terminal rows for conservative
+Codex/Claude UI markers. This fallback updates the workload badge only: it does
+not create a session or lifecycle state, and the screen text is not retained.
+The label intentionally does not guess Bash versus zsh/fish when no agent marker
+is present.
 Remote hook-owned agents add a `Remote` suffix. If the sessions snapshot is
 temporarily unavailable, Companion retains the last known agent or shows
 `Unknown` instead of incorrectly switching the card to `Shell`.
