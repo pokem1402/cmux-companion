@@ -108,13 +108,20 @@ public final class CmuxSnapshotLoader: Sendable {
 
     private let runner: any CmuxCommandRunning
     private let topTimeout: Duration
+    private let remoteScreenTimeout: Duration
 
     public init(
         runner: any CmuxCommandRunning,
-        topTimeout: Duration = .seconds(2)
+        topTimeout: Duration = .seconds(2),
+        remoteScreenTimeout: Duration = .seconds(1)
     ) {
         self.runner = runner
         self.topTimeout = topTimeout
+        self.remoteScreenTimeout = remoteScreenTimeout
+    }
+
+    public static func remoteScreenArguments(surfaceID: String) -> [String] {
+        ["read-screen", "--surface", surfaceID, "--lines", "16"]
     }
 
     public convenience init(locator: CmuxExecutableLocator = CmuxExecutableLocator()) throws {
@@ -133,7 +140,9 @@ public final class CmuxSnapshotLoader: Sendable {
         async let top = loadTextPart(
             arguments: Self.topArguments,
             timeout: topTimeout,
-            normalize: { try CmuxTopSnapshot(tsv: $0) }
+            normalize: { [self] text in
+                await addRemoteScreenEvidence(to: try CmuxTopSnapshot(tsv: text))
+            }
         )
         async let feed = loadPart(
             arguments: Self.feedArguments,
@@ -162,7 +171,9 @@ public final class CmuxSnapshotLoader: Sendable {
     }
 
     public func loadTop() async throws -> CmuxTopSnapshot {
-        try CmuxTopSnapshot(tsv: await loadText(arguments: Self.topArguments))
+        await addRemoteScreenEvidence(
+            to: try CmuxTopSnapshot(tsv: await loadText(arguments: Self.topArguments))
+        )
     }
 
     public func loadFeed() async throws -> CmuxFeedSnapshot {
@@ -187,27 +198,41 @@ public final class CmuxSnapshotLoader: Sendable {
     private func loadTextPart<Value: Sendable>(
         arguments: [String],
         timeout: Duration,
-        normalize: @escaping @Sendable (String) throws -> Value
+        normalize: @escaping @Sendable (String) async throws -> Value
     ) async -> CmuxSnapshotPart<Value> {
         do {
-            return .success(try await withThrowingTaskGroup(of: Value.self) { group in
-                group.addTask { [self] in
-                    try normalize(try await loadText(arguments: arguments))
-                }
-                group.addTask {
-                    try await Task.sleep(for: timeout)
-                    try Task.checkCancellation()
-                    throw CmuxSnapshotTimeoutError(command: arguments)
-                }
-                defer { group.cancelAll() }
-                guard let first = try await group.next() else {
-                    throw CancellationError()
-                }
-                return first
-            })
+            let text = try await loadText(arguments: arguments, timeout: timeout)
+            return .success(try await normalize(text))
         } catch {
             return .failure(CmuxSnapshotFailure(command: arguments, error: error))
         }
+    }
+
+    private func addRemoteScreenEvidence(to snapshot: CmuxTopSnapshot) async -> CmuxTopSnapshot {
+        guard !snapshot.remoteProbeSurfaceIDs.isEmpty else { return snapshot }
+
+        let screenTextBySurfaceID = await withTaskGroup(
+            of: (String, String?).self,
+            returning: [String: String].self
+        ) { group in
+            for surfaceID in snapshot.remoteProbeSurfaceIDs.sorted() {
+                group.addTask { [self] in
+                    let arguments = Self.remoteScreenArguments(surfaceID: surfaceID)
+                    let text = try? await loadText(
+                        arguments: arguments,
+                        timeout: remoteScreenTimeout
+                    )
+                    return (surfaceID, text)
+                }
+            }
+
+            var result: [String: String] = [:]
+            for await (surfaceID, text) in group {
+                if let text { result[surfaceID] = text }
+            }
+            return result
+        }
+        return snapshot.addingRemoteScreenEvidence(screenTextBySurfaceID)
     }
 
     private func loadJSON(arguments: [String]) async throws -> JSONValue {
@@ -220,6 +245,24 @@ public final class CmuxSnapshotLoader: Sendable {
             throw CmuxTransportError.invalidUTF8
         }
         return value
+    }
+
+    private func loadText(arguments: [String], timeout: Duration) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask { [self] in
+                try await loadText(arguments: arguments)
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                try Task.checkCancellation()
+                throw CmuxSnapshotTimeoutError(command: arguments)
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else {
+                throw CancellationError()
+            }
+            return first
+        }
     }
 
     private func loadData(arguments: [String]) async throws -> Data {

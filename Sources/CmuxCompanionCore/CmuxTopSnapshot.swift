@@ -23,15 +23,21 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
     public let workloadsBySurfaceID: [String: SurfaceWorkload]
     public let processIDsBySurfaceID: [String: Set<Int64>]
     public let agentWorkloadsBySurfaceAndProcessID: [String: [Int64: SurfaceWorkload]]
+    /// SSH surfaces whose local process tree cannot expose the remote
+    /// foreground process. The snapshot loader may inspect only these screens
+    /// for conservative, display-only agent evidence.
+    public let remoteProbeSurfaceIDs: Set<String>
 
     public init(
         workloadsBySurfaceID: [String: SurfaceWorkload] = [:],
         processIDsBySurfaceID: [String: Set<Int64>] = [:],
-        agentWorkloadsBySurfaceAndProcessID: [String: [Int64: SurfaceWorkload]] = [:]
+        agentWorkloadsBySurfaceAndProcessID: [String: [Int64: SurfaceWorkload]] = [:],
+        remoteProbeSurfaceIDs: Set<String> = []
     ) {
         self.workloadsBySurfaceID = workloadsBySurfaceID
         self.processIDsBySurfaceID = processIDsBySurfaceID
         self.agentWorkloadsBySurfaceAndProcessID = agentWorkloadsBySurfaceAndProcessID
+        self.remoteProbeSurfaceIDs = remoteProbeSurfaceIDs
     }
 
     public init(tsv: String) throws {
@@ -40,6 +46,7 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
         workloadsBySurfaceID = interpretation.workloads
         processIDsBySurfaceID = interpretation.processIDs
         agentWorkloadsBySurfaceAndProcessID = interpretation.agentWorkloadsByProcessID
+        remoteProbeSurfaceIDs = interpretation.remoteProbeSurfaceIDs
     }
 
     public func workload(forSurfaceID id: String) -> SurfaceWorkload? {
@@ -62,6 +69,28 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
         onSurfaceID surfaceID: String
     ) -> SurfaceWorkload? {
         agentWorkloadsBySurfaceAndProcessID[surfaceID]?[processID]
+    }
+
+    /// Applies remote terminal UI evidence only to surfaces already proven to
+    /// contain a local SSH client. Screen contents are classified in memory;
+    /// the original text is neither retained nor exposed by the snapshot.
+    public func addingRemoteScreenEvidence(
+        _ screenTextBySurfaceID: [String: String]
+    ) -> CmuxTopSnapshot {
+        var workloads = workloadsBySurfaceID
+        for (surfaceID, text) in screenTextBySurfaceID
+            where remoteProbeSurfaceIDs.contains(surfaceID) {
+            guard let workload = Self.remoteAgentWorkload(screenText: text) else {
+                continue
+            }
+            workloads[surfaceID] = workload
+        }
+        return CmuxTopSnapshot(
+            workloadsBySurfaceID: workloads,
+            processIDsBySurfaceID: processIDsBySurfaceID,
+            agentWorkloadsBySurfaceAndProcessID: agentWorkloadsBySurfaceAndProcessID,
+            remoteProbeSurfaceIDs: remoteProbeSurfaceIDs
+        )
     }
 
     private static func parseRows(_ tsv: String) throws -> [Row] {
@@ -117,7 +146,8 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
     ) -> (
         workloads: [String: SurfaceWorkload],
         processIDs: [String: Set<Int64>],
-        agentWorkloadsByProcessID: [String: [Int64: SurfaceWorkload]]
+        agentWorkloadsByProcessID: [String: [Int64: SurfaceWorkload]],
+        remoteProbeSurfaceIDs: Set<String>
     ) {
         let surfaceIDs = rows.lazy.filter { $0.kind == "surface" }.map(\.ref)
         let processRows = rows.filter { $0.kind == "process" }
@@ -145,6 +175,7 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
         var result: [String: SurfaceWorkload] = [:]
         var processIDsBySurfaceID: [String: Set<Int64>] = [:]
         var agentWorkloadsBySurfaceAndProcessID: [String: [Int64: SurfaceWorkload]] = [:]
+        var remoteProbeSurfaceIDs = Set<String>()
         for surfaceID in surfaceIDs {
             var includedPIDs = Set(
                 processRows.lazy.filter { $0.parentRef == surfaceID }.map(\.ref)
@@ -187,6 +218,7 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
             var taggedAgents = Set<AgentFamily>()
             var executableAgents = Set<AgentFamily>()
             var foundShell = false
+            var foundSSH = false
             var hasConflictingPID = false
             for process in processRows where includedPIDs.contains(process.ref) {
                 if let family = AgentFamily(processTitle: process.title) {
@@ -196,6 +228,7 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
                 hasConflictingPID = hasConflictingPID
                     || (ownAgentsByPID[process.ref]?.count ?? 0) > 1
                 foundShell = foundShell || ShellFamily.matches(process.title)
+                foundSSH = foundSSH || SecureShellFamily.matches(process.title)
             }
 
             if hasConflictingPID || taggedAgents.count > 1 {
@@ -210,10 +243,46 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
             } else if executableAgents.isEmpty, foundShell {
                 result[surfaceID] = .shell
             }
+            if foundSSH && taggedAgents.isEmpty && executableAgents.isEmpty {
+                remoteProbeSurfaceIDs.insert(surfaceID)
+            }
             // Conflicting agent evidence and unrecognized process-only
             // surfaces deliberately have no fallback instead of guessing.
         }
-        return (result, processIDsBySurfaceID, agentWorkloadsBySurfaceAndProcessID)
+        return (
+            result,
+            processIDsBySurfaceID,
+            agentWorkloadsBySurfaceAndProcessID,
+            remoteProbeSurfaceIDs
+        )
+    }
+
+    private static func remoteAgentWorkload(screenText: String) -> SurfaceWorkload? {
+        let lines = screenText
+            .split(whereSeparator: \Character.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        guard let statusLine = lines.last else { return nil }
+
+        // Both TUIs keep an identifying status bar at the bottom while they
+        // own the terminal. Looking only at the last non-empty line prevents
+        // exited agents or ordinary command output above a shell prompt from
+        // leaving a stale badge behind.
+        let claudeEvidence = statusLine.contains("shift+tab to cycle")
+        let codexEvidence: Bool = {
+            guard statusLine.contains(" · "),
+                  let model = statusLine.split(separator: " ").first else {
+                return false
+            }
+            return model.hasPrefix("gpt-")
+                || ["o1", "o3", "o4", "o5"].contains(String(model))
+        }()
+
+        switch (codexEvidence, claudeEvidence) {
+        case (true, false): return .codex
+        case (false, true): return .claude
+        default: return nil
+        }
     }
 }
 
@@ -333,6 +402,12 @@ private extension CmuxTopSnapshot {
 
         static func matches(_ processTitle: String) -> Bool {
             names.contains(CmuxTopSnapshot.normalizedExecutableName(processTitle))
+        }
+    }
+
+    enum SecureShellFamily {
+        static func matches(_ processTitle: String) -> Bool {
+            CmuxTopSnapshot.normalizedExecutableName(processTitle) == "ssh"
         }
     }
 
