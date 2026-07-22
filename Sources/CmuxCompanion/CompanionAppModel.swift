@@ -1341,6 +1341,8 @@ final class CompanionAppModel: ObservableObject {
                         : nil
                     let processWorkload = processWorkloads?.workload(forSurfaceID: surface.id)
                         ?? surface.ref.flatMap { processWorkloads?.workload(forSurfaceID: $0) }
+                    let taggedRuntimeState = processWorkloads?.runtimeState(forSurfaceID: surface.id)
+                        ?? surface.ref.flatMap { processWorkloads?.runtimeState(forSurfaceID: $0) }
                     let workload = SurfaceWorkload.resolved(
                         currentSession: session,
                         processWorkload: processWorkload,
@@ -1359,7 +1361,7 @@ final class CompanionAppModel: ObservableObject {
                         url: surface.url.flatMap(URL.init(string:)),
                         agent: session?.agent ?? session?.agentDisplayName,
                         sessionID: session?.id,
-                        runtimeState: session.map(runtimeState(for:)) ?? .unknown,
+                        runtimeState: session.map(runtimeState(for:)) ?? taggedRuntimeState ?? .unknown,
                         lastSubmittedText: prompt?.text,
                         lastSubmittedAt: prompt?.date,
                         displayOnlyPromptText: displayPrompt?.text,

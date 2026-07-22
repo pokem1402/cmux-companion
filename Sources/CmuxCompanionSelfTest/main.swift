@@ -530,13 +530,18 @@ private func testTransportNormalization() throws {
         "0.0\t10\t1\tprocess\t62\t61\tssh",
     ].joined(separator: "\n")
     let sshTop = try CmuxTopSnapshot(tsv: sshTSV).addingRemoteScreenEvidence([
-        "remote-claude": "Run claude --continue or claude --resume\nshift+tab to cycle",
-        "remote-codex": "› Implement {feature}\ngpt-5.6-sol xhigh · ~/remote/project",
+        "remote-claude": "Do you want to proceed?\nPress enter to confirm or esc to cancel\nshift+tab to cycle",
+        "remote-codex": "◦ Working (12s • esc to interrupt)\ngpt-5.6-sol xhigh · ~/remote/project",
     ])
     try require(
         sshTop.workload(forSurfaceID: "remote-claude") == .claude
             && sshTop.workload(forSurfaceID: "remote-codex") == .codex,
         "SSH surfaces must classify from conservative remote terminal UI evidence"
+    )
+    try require(
+        sshTop.runtimeState(forSurfaceID: "remote-claude") == .waiting
+            && sshTop.runtimeState(forSurfaceID: "remote-codex") == .running,
+        "SSH terminal controls must provide conservative remote runtime evidence"
     )
     try require(
         CmuxSnapshotLoader.remoteScreenArguments(surfaceID: "remote-codex") == [
