@@ -239,6 +239,29 @@ final class CmuxTransportTests: XCTestCase {
             try CmuxTopSnapshot(tsv: tsv).workload(forSurfaceID: "surface-1"),
             .claude
         )
+        XCTAssertEqual(
+            try CmuxTopSnapshot(tsv: tsv).runtimeState(forSurfaceID: "surface-1"),
+            .running
+        )
+    }
+
+    func testCodexScopedTagMapsRuntimeOnlyToItsExactSurface() throws {
+        let tsv = [
+            "0.1\t100\t1\ttag\tworkspace-1:tag:codex\tworkspace-1\tNeeds Input",
+            "0.1\t100\t2\ttag\tworkspace-1:tag:codex.session-1\tworkspace-1\t",
+            "0.1\t50\t1\tprocess\t41\tworkspace-1:tag:codex.session-1\tnode",
+            "0.1\t100\t3\tsurface\tsurface-tagged\tpane-1\tCodex",
+            "0.1\t50\t1\tprocess\t41\tsurface-tagged\tnode",
+            "0.1\t50\t1\tprocess\t42\t41\tcodex",
+            "0.1\t100\t2\tsurface\tsurface-sibling\tpane-2\tCodex sibling",
+            "0.1\t50\t1\tprocess\t50\tsurface-sibling\tcodex",
+        ].joined(separator: "\n")
+
+        let snapshot = try CmuxTopSnapshot(tsv: tsv)
+        XCTAssertEqual(snapshot.workload(forSurfaceID: "surface-tagged"), .codex)
+        XCTAssertEqual(snapshot.runtimeState(forSurfaceID: "surface-tagged"), .waiting)
+        XCTAssertEqual(snapshot.workload(forSurfaceID: "surface-sibling"), .codex)
+        XCTAssertNil(snapshot.runtimeState(forSurfaceID: "surface-sibling"))
     }
 
     func testSSHSurfacesUseConservativeRemoteScreenEvidence() throws {
@@ -262,11 +285,14 @@ final class CmuxTransportTests: XCTestCase {
 
         let classified = snapshot.addingRemoteScreenEvidence([
             "surface-claude": """
+                Do you want to proceed?
+                Press enter to confirm or esc to cancel
                 Tip: Run claude --continue or claude --resume to resume a conversation
                 ⏵⏵ auto mode on (shift+tab to cycle)
                 """,
             "surface-codex": """
                 › Implement {feature}
+                ◦ Working (12s • esc to interrupt)
                 gpt-5.6-sol xhigh fast · ~/workspace/project
                 """,
             "surface-shell": "gpt-5.6 · ~/workspace/project · shift+tab to cycle",
@@ -276,6 +302,9 @@ final class CmuxTransportTests: XCTestCase {
         XCTAssertEqual(classified.workload(forSurfaceID: "surface-claude"), .claude)
         XCTAssertEqual(classified.workload(forSurfaceID: "surface-codex"), .codex)
         XCTAssertEqual(classified.workload(forSurfaceID: "surface-shell"), .shell)
+        XCTAssertEqual(classified.runtimeState(forSurfaceID: "surface-claude"), .waiting)
+        XCTAssertEqual(classified.runtimeState(forSurfaceID: "surface-codex"), .running)
+        XCTAssertNil(classified.runtimeState(forSurfaceID: "surface-shell"))
         XCTAssertNil(classified.workload(forSurfaceID: "not-an-ssh-surface"))
     }
 

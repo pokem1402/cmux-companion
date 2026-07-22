@@ -14,27 +14,30 @@ public enum CmuxTopSnapshotError: Error, LocalizedError, Sendable, Equatable {
     }
 }
 
-/// A conservative, display-only interpretation of `cmux top --processes`.
+/// A conservative interpretation of `cmux top --processes`.
 ///
-/// This snapshot never manufactures an agent session or lifecycle state. It
-/// only provides a fresh process-based workload hint for a surface when cmux's
-/// hook-backed session store has no current owner for that surface.
+/// Process names provide only a display workload hint. A runtime state is
+/// exposed separately and only when cmux's own hook-backed agent tag, its
+/// session-scoped PID, and the exact terminal surface all agree.
 public struct CmuxTopSnapshot: Sendable, Equatable {
     public let workloadsBySurfaceID: [String: SurfaceWorkload]
+    public let runtimeStatesBySurfaceID: [String: MemberRuntimeState]
     public let processIDsBySurfaceID: [String: Set<Int64>]
     public let agentWorkloadsBySurfaceAndProcessID: [String: [Int64: SurfaceWorkload]]
     /// SSH surfaces whose local process tree cannot expose the remote
     /// foreground process. The snapshot loader may inspect only these screens
-    /// for conservative, display-only agent evidence.
+    /// for conservative agent and runtime evidence.
     public let remoteProbeSurfaceIDs: Set<String>
 
     public init(
         workloadsBySurfaceID: [String: SurfaceWorkload] = [:],
+        runtimeStatesBySurfaceID: [String: MemberRuntimeState] = [:],
         processIDsBySurfaceID: [String: Set<Int64>] = [:],
         agentWorkloadsBySurfaceAndProcessID: [String: [Int64: SurfaceWorkload]] = [:],
         remoteProbeSurfaceIDs: Set<String> = []
     ) {
         self.workloadsBySurfaceID = workloadsBySurfaceID
+        self.runtimeStatesBySurfaceID = runtimeStatesBySurfaceID
         self.processIDsBySurfaceID = processIDsBySurfaceID
         self.agentWorkloadsBySurfaceAndProcessID = agentWorkloadsBySurfaceAndProcessID
         self.remoteProbeSurfaceIDs = remoteProbeSurfaceIDs
@@ -44,6 +47,7 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
         let rows = try Self.parseRows(tsv)
         let interpretation = Self.interpret(rows)
         workloadsBySurfaceID = interpretation.workloads
+        runtimeStatesBySurfaceID = interpretation.runtimeStates
         processIDsBySurfaceID = interpretation.processIDs
         agentWorkloadsBySurfaceAndProcessID = interpretation.agentWorkloadsByProcessID
         remoteProbeSurfaceIDs = interpretation.remoteProbeSurfaceIDs
@@ -51,6 +55,13 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
 
     public func workload(forSurfaceID id: String) -> SurfaceWorkload? {
         workloadsBySurfaceID[id]
+    }
+
+    /// A hook-backed state published by cmux's agent status tag. Unlike a
+    /// process-name workload hint, this may be used as lifecycle evidence when
+    /// `cmux sessions` temporarily omits the active local agent record.
+    public func runtimeState(forSurfaceID id: String) -> MemberRuntimeState? {
+        runtimeStatesBySurfaceID[id]
     }
 
     /// Every numeric process ref attributed to the surface, including
@@ -72,21 +83,26 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
     }
 
     /// Applies remote terminal UI evidence only to surfaces already proven to
-    /// contain a local SSH client. Screen contents are classified in memory;
-    /// the original text is neither retained nor exposed by the snapshot.
+    /// contain a local SSH client. Visible choice controls mean `waiting`, an
+    /// active interrupt control means `running`, and an otherwise intact agent
+    /// prompt means `idle`. Screen contents are classified in memory; the
+    /// original text is neither retained nor exposed by the snapshot.
     public func addingRemoteScreenEvidence(
         _ screenTextBySurfaceID: [String: String]
     ) -> CmuxTopSnapshot {
         var workloads = workloadsBySurfaceID
+        var runtimeStates = runtimeStatesBySurfaceID
         for (surfaceID, text) in screenTextBySurfaceID
             where remoteProbeSurfaceIDs.contains(surfaceID) {
-            guard let workload = Self.remoteAgentWorkload(screenText: text) else {
+            guard let evidence = Self.remoteAgentEvidence(screenText: text) else {
                 continue
             }
-            workloads[surfaceID] = workload
+            workloads[surfaceID] = evidence.workload
+            runtimeStates[surfaceID] = evidence.runtimeState
         }
         return CmuxTopSnapshot(
             workloadsBySurfaceID: workloads,
+            runtimeStatesBySurfaceID: runtimeStates,
             processIDsBySurfaceID: processIDsBySurfaceID,
             agentWorkloadsBySurfaceAndProcessID: agentWorkloadsBySurfaceAndProcessID,
             remoteProbeSurfaceIDs: remoteProbeSurfaceIDs
@@ -145,6 +161,7 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
         _ rows: [Row]
     ) -> (
         workloads: [String: SurfaceWorkload],
+        runtimeStates: [String: MemberRuntimeState],
         processIDs: [String: Set<Int64>],
         agentWorkloadsByProcessID: [String: [Int64: SurfaceWorkload]],
         remoteProbeSurfaceIDs: Set<String>
@@ -152,19 +169,37 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
         let surfaceIDs = rows.lazy.filter { $0.kind == "surface" }.map(\.ref)
         let processRows = rows.filter { $0.kind == "process" }
 
-        let taggedAgentByRef = Dictionary(
-            rows.compactMap { row -> (String, AgentFamily)? in
-                guard row.kind == "tag", let family = AgentFamily(tagRef: row.ref) else {
+        let agentTagByRef = Dictionary(
+            rows.compactMap { row -> (String, AgentTagDescriptor)? in
+                guard row.kind == "tag", let tag = AgentTagDescriptor(ref: row.ref) else {
                     return nil
                 }
-                return (row.ref, family)
+                return (row.ref, tag)
             },
             uniquingKeysWith: { first, _ in first }
         )
+        var runtimeValuesByWorkspaceAgent: [WorkspaceAgent: Set<String>] = [:]
+        for row in rows where row.kind == "tag" {
+            guard let tag = agentTagByRef[row.ref], tag.isWorkspaceStatus,
+                  let state = runtimeState(statusTitle: row.title) else {
+                continue
+            }
+            runtimeValuesByWorkspaceAgent[tag.workspaceAgent, default: []]
+                .insert(state.rawValue)
+        }
+        let runtimeStateByWorkspaceAgent: [WorkspaceAgent: MemberRuntimeState] =
+            runtimeValuesByWorkspaceAgent.compactMapValues { values -> MemberRuntimeState? in
+                guard values.count == 1, let value = values.first else { return nil }
+                return MemberRuntimeState(rawValue: value)
+            }
         var taggedAgentsByPID: [String: Set<AgentFamily>] = [:]
+        var taggedRuntimeValuesByPID: [String: Set<String>] = [:]
         for process in processRows {
-            guard let family = taggedAgentByRef[process.parentRef] else { continue }
-            taggedAgentsByPID[process.ref, default: []].insert(family)
+            guard let tag = agentTagByRef[process.parentRef] else { continue }
+            taggedAgentsByPID[process.ref, default: []].insert(tag.family)
+            if let state = runtimeStateByWorkspaceAgent[tag.workspaceAgent] {
+                taggedRuntimeValuesByPID[process.ref, default: []].insert(state.rawValue)
+            }
         }
         var ownAgentsByPID = taggedAgentsByPID
         for process in processRows {
@@ -173,6 +208,7 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
         }
 
         var result: [String: SurfaceWorkload] = [:]
+        var runtimeStatesBySurfaceID: [String: MemberRuntimeState] = [:]
         var processIDsBySurfaceID: [String: Set<Int64>] = [:]
         var agentWorkloadsBySurfaceAndProcessID: [String: [Int64: SurfaceWorkload]] = [:]
         var remoteProbeSurfaceIDs = Set<String>()
@@ -220,11 +256,13 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
             var foundShell = false
             var foundSSH = false
             var hasConflictingPID = false
+            var taggedRuntimeValues = Set<String>()
             for process in processRows where includedPIDs.contains(process.ref) {
                 if let family = AgentFamily(processTitle: process.title) {
                     executableAgents.insert(family)
                 }
                 taggedAgents.formUnion(taggedAgentsByPID[process.ref] ?? [])
+                taggedRuntimeValues.formUnion(taggedRuntimeValuesByPID[process.ref] ?? [])
                 hasConflictingPID = hasConflictingPID
                     || (ownAgentsByPID[process.ref]?.count ?? 0) > 1
                 foundShell = foundShell || ShellFamily.matches(process.title)
@@ -238,6 +276,11 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
                 // Codex/Claude helper may appear in the same process tree and
                 // must not replace that owner.
                 result[surfaceID] = taggedAgent.workload
+                if taggedRuntimeValues.count == 1,
+                   let rawState = taggedRuntimeValues.first,
+                   let state = MemberRuntimeState(rawValue: rawState) {
+                    runtimeStatesBySurfaceID[surfaceID] = state
+                }
             } else if executableAgents.count == 1, let family = executableAgents.first {
                 result[surfaceID] = family.workload
             } else if executableAgents.isEmpty, foundShell {
@@ -251,13 +294,14 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
         }
         return (
             result,
+            runtimeStatesBySurfaceID,
             processIDsBySurfaceID,
             agentWorkloadsBySurfaceAndProcessID,
             remoteProbeSurfaceIDs
         )
     }
 
-    private static func remoteAgentWorkload(screenText: String) -> SurfaceWorkload? {
+    private static func remoteAgentEvidence(screenText: String) -> RemoteAgentEvidence? {
         let lines = screenText
             .split(whereSeparator: \Character.isNewline)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
@@ -278,9 +322,46 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
                 || ["o1", "o3", "o4", "o5"].contains(String(model))
         }()
 
+        let workload: SurfaceWorkload
         switch (codexEvidence, claudeEvidence) {
-        case (true, false): return .codex
-        case (false, true): return .claude
+        case (true, false): workload = .codex
+        case (false, true): workload = .claude
+        default: return nil
+        }
+
+        // State controls are transient and rendered near the bottom of both
+        // TUIs. Limit classification to the bottom-most non-empty rows so an
+        // old completed turn in scrollback cannot keep the agent `running`.
+        let stateLines = lines.suffix(8)
+        let waiting = stateLines.contains { line in
+            line.contains("press enter to confirm")
+                || line.contains("enter to select")
+                || line.contains("tab to amend")
+        } || (
+            stateLines.contains(where: { $0.contains("esc to cancel") })
+                && stateLines.contains(where: { line in
+                    line.contains("yes, proceed")
+                        || line.contains("yes, and don't ask again")
+                        || line.contains("do you want to")
+                        || line.contains("would you like to")
+                })
+        )
+        let running = stateLines.contains { line in
+            line.contains("esc to interrupt") || line.contains("ctrl+c to interrupt")
+        }
+        let runtimeState: MemberRuntimeState = waiting ? .waiting : (running ? .running : .idle)
+        return RemoteAgentEvidence(workload: workload, runtimeState: runtimeState)
+    }
+
+    private static func runtimeState(statusTitle: String) -> MemberRuntimeState? {
+        switch normalizedToken(statusTitle) {
+        case "running", "working", "busy", "active": return .running
+        case "needsinput", "waiting", "permission", "blocked": return .waiting
+        case "idle", "stopped", "stop", "done": return .idle
+        case "ended", "closed", "exited": return .ended
+        case "stale": return .stale
+        case "disconnected", "offline": return .disconnected
+        case "error", "failed": return .error
         default: return nil
         }
     }
@@ -357,11 +438,48 @@ public extension CmuxAgentSessionResolver {
 }
 
 private extension CmuxTopSnapshot {
+    struct RemoteAgentEvidence: Sendable, Equatable {
+        let workload: SurfaceWorkload
+        let runtimeState: MemberRuntimeState
+    }
+
     struct Row: Sendable, Equatable {
         let kind: String
         let ref: String
         let parentRef: String
         let title: String
+    }
+
+    struct WorkspaceAgent: Hashable, Sendable {
+        let workspaceID: String
+        let family: AgentFamily
+    }
+
+    struct AgentTagDescriptor: Sendable, Equatable {
+        let workspaceAgent: WorkspaceAgent
+        let isWorkspaceStatus: Bool
+
+        var family: AgentFamily { workspaceAgent.family }
+
+        init?(ref: String) {
+            guard let marker = ref.range(of: ":tag:", options: .backwards) else {
+                return nil
+            }
+            let workspaceID = String(ref[..<marker.lowerBound])
+            let rawTag = String(ref[marker.upperBound...])
+            let components = rawTag.split(separator: ".", maxSplits: 1)
+            guard !workspaceID.isEmpty, let familyToken = components.first else {
+                return nil
+            }
+            let family: AgentFamily
+            switch CmuxTopSnapshot.normalizedToken(String(familyToken)) {
+            case "codex": family = .codex
+            case "claude", "claudecode": family = .claude
+            default: return nil
+            }
+            workspaceAgent = WorkspaceAgent(workspaceID: workspaceID, family: family)
+            isWorkspaceStatus = components.count == 1
+        }
     }
 
     enum AgentFamily: Hashable, Sendable {
@@ -377,14 +495,8 @@ private extension CmuxTopSnapshot {
         }
 
         init?(tagRef: String) {
-            guard let marker = tagRef.range(of: ":tag:", options: .backwards) else {
-                return nil
-            }
-            switch CmuxTopSnapshot.normalizedToken(String(tagRef[marker.upperBound...])) {
-            case "codex": self = .codex
-            case "claude", "claudecode": self = .claude
-            default: return nil
-            }
+            guard let tag = AgentTagDescriptor(ref: tagRef) else { return nil }
+            self = tag.family
         }
 
         var workload: SurfaceWorkload {

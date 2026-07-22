@@ -19,6 +19,7 @@ enum DragAndDropSelfTest {
         try verifyDashboardWindow()
         try verifyMenuBarLayout()
         try verifyRemoteLiveSurfaceOverlay()
+        try verifyLocalTopRuntimeFallback()
         try verifyRemoteEventPipeline()
         try verifySearch()
         try verifyColorPalette()
@@ -1207,6 +1208,64 @@ enum DragAndDropSelfTest {
               restoredCache[unsafeShortRefState.sessionID] == nil else {
             throw DragAndDropSelfTestError.assertion(
                 "remote identity cache was not restored without private prompt text"
+            )
+        }
+    }
+
+    @MainActor
+    private static func verifyLocalTopRuntimeFallback() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "cmux-companion-local-top-state-selftest-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let workspaceID = "00000000-0000-0000-0000-000000000101"
+        let surfaceID = "00000000-0000-0000-0000-000000000102"
+        let tree = CmuxTreeSnapshot(raw: try CmuxJSON.decode(#"""
+        {"windows":[{"id":"00000000-0000-0000-0000-000000000103","workspaces":[{"id":"\#(workspaceID)","title":"Local","panes":[{"id":"00000000-0000-0000-0000-000000000104","surfaces":[{"id":"\#(surfaceID)","type":"terminal","title":"Codex"}]}]}]}]}
+        """#))
+        let store = CompanionStore(url: root.appendingPathComponent("sets.json"))
+        let model = CompanionAppModel(
+            store: store,
+            inbox: CommandInbox(directoryURL: root.appendingPathComponent("commands", isDirectory: true))
+        )
+
+        func snapshot(status: String) throws -> CmuxTransportSnapshot {
+            let top = try CmuxTopSnapshot(tsv: [
+                "0.1\t100\t1\ttag\t\(workspaceID):tag:codex\t\(workspaceID)\t\(status)",
+                "0.1\t100\t2\ttag\t\(workspaceID):tag:codex.session-1\t\(workspaceID)\t",
+                "0.1\t50\t1\tprocess\t41\t\(workspaceID):tag:codex.session-1\tnode",
+                "0.1\t100\t3\tsurface\t\(surfaceID)\tpane-1\tCodex",
+                "0.1\t50\t1\tprocess\t41\t\(surfaceID)\tnode",
+                "0.1\t50\t1\tprocess\t42\t41\tcodex",
+            ].joined(separator: "\n"))
+            return CmuxTransportSnapshot(
+                tree: .success(tree),
+                sessions: .success(CmuxSessionsSnapshot(raw: try CmuxJSON.decode(#"{"sessions":[]}"#))),
+                top: .success(top),
+                feed: .success(CmuxFeedSnapshot(raw: try CmuxJSON.decode(#"{"items":[]}"#))),
+                notifications: .success(
+                    CmuxNotificationsSnapshot(raw: try CmuxJSON.decode(#"{"notifications":[]}"#))
+                )
+            )
+        }
+
+        model.applySnapshotForSelfTest(try snapshot(status: "Running"))
+        guard model.liveSurfaces.count == 1,
+              model.liveSurfaces[0].workload == .codex,
+              model.liveSurfaces[0].runtimeState == .running else {
+            throw DragAndDropSelfTestError.assertion(
+                "local Codex top tag did not supply a running live-surface state"
+            )
+        }
+
+        model.applySnapshotForSelfTest(try snapshot(status: "Idle"))
+        guard model.liveSurfaces[0].runtimeState == .idle else {
+            throw DragAndDropSelfTestError.assertion(
+                "local Codex top tag did not update the live-surface state to idle"
             )
         }
     }
