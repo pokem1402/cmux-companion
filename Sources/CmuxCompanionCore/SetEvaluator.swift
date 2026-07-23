@@ -91,9 +91,14 @@ public enum SetEvaluator {
             switch group.policy {
             case .all:
                 // A required but not-yet-populated group must not appear healthy.
-                requiredActiveCount = group.required
-                    ? max(1, group.memberIDs.count)
-                    : group.memberIDs.count
+                let populatedCount = group.memberIDs.count
+                if group.role == .reviewer, populatedCount > 1 {
+                    requiredActiveCount = group.required ? 1 : min(1, populatedCount)
+                } else {
+                    requiredActiveCount = group.required
+                        ? max(1, populatedCount)
+                        : populatedCount
+                }
             case let .minActive(minimum):
                 requiredActiveCount = max(0, minimum)
             }

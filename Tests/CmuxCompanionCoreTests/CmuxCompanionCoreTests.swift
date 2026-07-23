@@ -88,6 +88,28 @@ final class SetEvaluatorTests: XCTestCase {
         XCTAssertFalse(result.shouldNotify)
     }
 
+    func testReviewerAllPolicyNeedsOnlyOneActiveReviewer() {
+        let first = WorkMember(label: "Claude", role: .reviewer, runtimeState: .running)
+        let second = WorkMember(label: "Codex", role: .reviewer, runtimeState: .idle)
+        let group = WorkGroup(
+            label: "Reviewers",
+            role: .reviewer,
+            policy: .all,
+            memberIDs: [first.id, second.id]
+        )
+        var set = WorkSet(label: "Review", armed: true, groups: [group], members: [first, second])
+
+        var result = SetEvaluator.evaluate(set)
+        XCTAssertEqual(result.status, .active)
+        XCTAssertEqual(result.groups.first?.requiredActiveCount, 1)
+        XCTAssertTrue(result.deficientGroupIDs.isEmpty)
+
+        set.members[0].runtimeState = .idle
+        result = SetEvaluator.evaluate(set)
+        XCTAssertEqual(result.status, .incomplete)
+        XCTAssertEqual(result.deficientGroupIDs, [group.id])
+    }
+
     func testStopDoesNotCompleteGenerationButManualCompletionDoes() {
         let member = WorkMember(label: "Main", role: .worker, runtimeState: .ended)
         let group = WorkGroup(label: "Worker", role: .worker, policy: .all, memberIDs: [member.id])
@@ -345,6 +367,18 @@ final class CommandReducerTests: XCTestCase {
         _ = try CommandReducer.apply(lastInput, to: &snapshot)
         XCTAssertEqual(snapshot.sets[0].members[0].lastSubmittedText, lastInput.text)
         XCTAssertEqual(snapshot.sets[0].members[0].lastSubmittedAt, inputAt)
+
+        let waitingAt = heartbeatAt.addingTimeInterval(2)
+        let waitingHeartbeat = InboxCommand(
+            kind: .heartbeat,
+            createdAt: waitingAt,
+            session: "session",
+            state: MemberRuntimeState.waiting.rawValue,
+            cmuxContext: CmuxContext(surfaceID: "surface")
+        )
+        _ = try CommandReducer.apply(waitingHeartbeat, to: &snapshot)
+        XCTAssertEqual(snapshot.sets[0].members[0].runtimeState, .waiting)
+        XCTAssertEqual(snapshot.sets[0].members[0].runtimeStateChangedAt, waitingAt)
     }
 
     func testArmCompleteRenameAndLeaveLifecycle() throws {

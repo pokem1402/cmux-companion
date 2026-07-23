@@ -306,20 +306,30 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
             .split(whereSeparator: \Character.isNewline)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { !$0.isEmpty }
-        guard let statusLine = lines.last else { return nil }
+        guard !lines.isEmpty else { return nil }
+        let statusWindow = lines.suffix(12)
 
         // Both TUIs keep an identifying status bar at the bottom while they
         // own the terminal. Looking only at the last non-empty line prevents
         // exited agents or ordinary command output above a shell prompt from
         // leaving a stale badge behind.
-        let claudeEvidence = statusLine.contains("shift+tab to cycle")
+        let claudeEvidence = statusWindow.contains { line in
+            line.contains("shift+tab to cycle")
+                || line.contains("claude code")
+                || line.contains("claude-code")
+        }
         let codexEvidence: Bool = {
-            guard statusLine.contains(" · "),
-                  let model = statusLine.split(separator: " ").first else {
-                return false
+            for line in statusWindow where line.contains(" · ") {
+                guard let model = line.split(separator: " ").first else { continue }
+                if model.hasPrefix("gpt-")
+                    || ["o1", "o3", "o4", "o5"].contains(String(model)) {
+                    return true
+                }
             }
-            return model.hasPrefix("gpt-")
-                || ["o1", "o3", "o4", "o5"].contains(String(model))
+            return statusWindow.contains { line in
+                line.contains("codex")
+                    && (line.contains("approve") || line.contains("allow") || line.contains("confirm"))
+            }
         }()
 
         let workload: SurfaceWorkload
@@ -335,8 +345,14 @@ public struct CmuxTopSnapshot: Sendable, Equatable {
         let stateLines = lines.suffix(8)
         let waiting = stateLines.contains { line in
             line.contains("press enter to confirm")
+                || line.contains("enter to confirm")
                 || line.contains("enter to select")
                 || line.contains("tab to amend")
+                || line.contains("allow command")
+                || line.contains("approve command")
+                || line.contains("run this command")
+                || line.contains("yes, allow")
+                || line.contains("press y to confirm")
         } || (
             stateLines.contains(where: { $0.contains("esc to cancel") })
                 && stateLines.contains(where: { line in

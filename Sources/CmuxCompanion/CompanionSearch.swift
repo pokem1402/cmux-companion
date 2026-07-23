@@ -7,6 +7,7 @@ struct CompanionSearchResults {
     let matchingSetIDs: Set<UUID>
     let matchingUnlinkedSurfaceIDs: Set<String>
     let isActive: Bool
+    let usesDisplayOrder: Bool
     let hasAnyMatch: Bool
 }
 
@@ -19,12 +20,14 @@ enum CompanionSearch {
     ) -> CompanionSearchResults {
         let tokens = normalizedTokens(query)
         guard !tokens.isEmpty else {
+            let orderedSets = orderedForDisplay(sets)
             return CompanionSearchResults(
-                sets: sets,
+                sets: orderedSets,
                 unlinkedSurfaces: unlinkedSurfaces,
-                matchingSetIDs: Set(sets.map(\.id)),
+                matchingSetIDs: Set(orderedSets.map(\.id)),
                 matchingUnlinkedSurfaceIDs: Set(unlinkedSurfaces.map(\.id)),
                 isActive: false,
+                usesDisplayOrder: true,
                 hasAnyMatch: true
             )
         }
@@ -37,7 +40,8 @@ enum CompanionSearch {
         }
         let hasAnyMatch = !matchingSets.isEmpty || !matchingSurfaces.isEmpty
         let matchingSetIDs = Set(matchingSets.map(\.id))
-        let orderedSets = matchingSets + sets.filter { !matchingSetIDs.contains($0.id) }
+        let orderedSets = orderedForDisplay(matchingSets)
+            + orderedForDisplay(sets.filter { !matchingSetIDs.contains($0.id) })
 
         // Every set remains visible during a successful search because linked
         // members can be dragged from any source set to any destination set.
@@ -51,6 +55,7 @@ enum CompanionSearch {
             matchingSetIDs: matchingSetIDs,
             matchingUnlinkedSurfaceIDs: Set(matchingSurfaces.map(\.id)),
             isActive: true,
+            usesDisplayOrder: true,
             hasAnyMatch: hasAnyMatch
         )
     }
@@ -118,6 +123,25 @@ enum CompanionSearch {
         guard !tokens.isEmpty else { return true }
         let haystack = values.compactMap { $0 }.map(normalized).joined(separator: "\n")
         return tokens.allSatisfy(haystack.contains)
+    }
+
+    private static func orderedForDisplay(_ sets: [WorkSet]) -> [WorkSet] {
+        sets.enumerated().sorted { lhs, rhs in
+            let lhsRank = displayRank(lhs.element)
+            let rhsRank = displayRank(rhs.element)
+            if lhsRank != rhsRank { return lhsRank < rhsRank }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
+    private static func displayRank(_ set: WorkSet) -> Int {
+        let evaluation = SetEvaluator.evaluate(set)
+        switch evaluation.status {
+        case .attention: return 0
+        case .incomplete: return 1
+        case .active: return 2
+        case .idle: return 3
+        }
     }
 
     private static func normalizedTokens(_ query: String) -> [String] {

@@ -45,6 +45,7 @@ struct DashboardRootView: View {
                         sets: searchResults.sets,
                         matchingSetIDs: searchResults.matchingSetIDs,
                         searchIsActive: searchResults.isActive,
+                        usesDisplayOrder: searchResults.usesDisplayOrder,
                         selectedSetID: selectedSetID,
                         newSetName: $newSetName,
                         onSelectSet: { select($0, using: proxy) },
@@ -359,6 +360,7 @@ private struct DashboardSetSidebar: View {
     let sets: [WorkSet]
     let matchingSetIDs: Set<UUID>
     let searchIsActive: Bool
+    let usesDisplayOrder: Bool
     let selectedSetID: UUID?
     @Binding var newSetName: String
     let onSelectSet: (UUID) -> Void
@@ -400,7 +402,7 @@ private struct DashboardSetSidebar: View {
                             set: set,
                             evaluation: evaluation,
                             selected: selectedSetID == set.id,
-                            reorderingEnabled: !searchIsActive,
+                            reorderingEnabled: !searchIsActive && !usesDisplayOrder,
                             forceExpanded: searchIsActive && matchingSetIDs.contains(set.id),
                             onSelect: { onSelectSet(set.id) }
                         )
@@ -620,7 +622,7 @@ private struct DashboardSetBoard: View {
                                 evaluation: model.evaluations[set.id] ?? SetEvaluator.evaluate(set),
                                 forceExpanded: searchResults.isActive
                                     && searchResults.matchingSetIDs.contains(set.id),
-                                allowsReordering: !searchResults.isActive
+                                allowsReordering: !searchResults.isActive && !searchResults.usesDisplayOrder
                             )
                             .id(set.id)
                             .overlay {

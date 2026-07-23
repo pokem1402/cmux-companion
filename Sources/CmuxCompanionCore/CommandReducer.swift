@@ -105,6 +105,7 @@ public enum CommandReducer {
             }
         case .heartbeat:
             return try updateMatchingMembers(command, snapshot: &snapshot) { member in
+                let previousRuntimeState = member.runtimeState
                 member.sessionID = normalized(command.session) ?? member.sessionID
                 member.surfaceID = command.cmuxContext.effectiveSurfaceID ?? member.surfaceID
                 member.workspaceID = command.cmuxContext.workspaceID ?? member.workspaceID
@@ -112,6 +113,9 @@ public enum CommandReducer {
                 member.agent = normalized(command.agent) ?? member.agent
                 member.runtimeState = command.state.flatMap(runtimeState(from:))
                     ?? member.runtimeState
+                if member.runtimeState != previousRuntimeState {
+                    member.runtimeStateChangedAt = command.createdAt
+                }
                 member.isRemote = command.remote ?? true
                 member.lastHeartbeatAt = command.createdAt
             }

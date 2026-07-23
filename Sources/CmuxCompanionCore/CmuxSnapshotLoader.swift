@@ -337,6 +337,20 @@ public final class CmuxCommandClient: Sendable {
         return try await runner.run(arguments: arguments)
     }
 
+    @discardableResult
+    public func renameSurface(
+        _ surfaceID: String,
+        title: String,
+        workspaceID: String? = nil,
+        windowID: String? = nil
+    ) async throws -> CmuxProcessResult {
+        var arguments = ["rename-tab", "--surface", surfaceID]
+        if let workspaceID { arguments += ["--workspace", workspaceID] }
+        if let windowID { arguments += ["--window", windowID] }
+        arguments.append(title)
+        return try await runner.run(arguments: arguments)
+    }
+
     /// Focuses from broadest to narrowest. UUIDs are passed literally and cmux
     /// resolves the corresponding window/workspace/surface.
     public func focus(_ target: CmuxFocusTarget) async throws {

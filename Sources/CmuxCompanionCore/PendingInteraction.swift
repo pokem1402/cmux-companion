@@ -195,6 +195,10 @@ public struct InteractionTransitionTracker: Sendable {
                     )
                 } else if previous == .running,
                           member.runtimeState == .idle || member.runtimeState == .ended {
+                    if member.role == .reviewer,
+                       set.requiredReviewerGroupStillRunning(after: member.id) {
+                        continue
+                    }
                     interactions.append(
                         PendingInteraction(
                             id: "completion:\(set.id.uuidString):\(member.id.uuidString):\(set.generation)",
@@ -216,6 +220,20 @@ public struct InteractionTransitionTracker: Sendable {
             }
         }
         return interactions
+    }
+}
+
+private extension WorkSet {
+    func requiredReviewerGroupStillRunning(after completedMemberID: UUID) -> Bool {
+        groups.contains { group in
+            group.required
+                && group.role == .reviewer
+                && group.memberIDs.contains(completedMemberID)
+                && group.memberIDs.contains { memberID in
+                    memberID != completedMemberID
+                        && members.first(where: { $0.id == memberID })?.runtimeState == .running
+                }
+        }
     }
 }
 

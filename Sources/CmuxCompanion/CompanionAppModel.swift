@@ -44,6 +44,32 @@ struct HookSetupFeedback: Equatable {
     let detail: String
 }
 
+enum TerminalNameSyncMode: String, CaseIterable, Identifiable {
+    case manual
+    case cmuxToCompanion
+    case companionToCmux
+    case twoWay
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .manual: return "수동"
+        case .cmuxToCompanion: return "cmux → Companion"
+        case .companionToCmux: return "Companion → cmux"
+        case .twoWay: return "양방향"
+        }
+    }
+
+    var syncsFromCmux: Bool {
+        self == .cmuxToCompanion || self == .twoWay
+    }
+
+    var syncsToCmux: Bool {
+        self == .companionToCmux || self == .twoWay
+    }
+}
+
 @MainActor
 final class CompanionAppModel: ObservableObject {
     @Published private(set) var sets: [WorkSet] = []
@@ -64,6 +90,9 @@ final class CompanionAppModel: ObservableObject {
     @Published var showPromptPreview: Bool {
         didSet { preferences.set(showPromptPreview, forKey: Self.showPromptPreviewKey) }
     }
+    @Published var terminalNameSyncMode: TerminalNameSyncMode {
+        didSet { preferences.set(terminalNameSyncMode.rawValue, forKey: Self.terminalNameSyncModeKey) }
+    }
 
     var onEvaluationsChanged: (([WorkSet], [UUID: SetEvaluation]) -> Void)?
     var onAttentionTransition: ((WorkSet, SetEvaluation, SetEvaluation?) -> Void)?
@@ -73,6 +102,7 @@ final class CompanionAppModel: ObservableObject {
     private static let showPetKey = "showFloatingPet"
     private static let showPromptPreviewKey = "showPromptPreview"
     private static let collapsedSetIDsKey = "collapsedWorkSetIDs"
+    private static let terminalNameSyncModeKey = "terminalNameSyncMode"
     private static let setOrderErrorPrefix = "세트 순서를 변경하지 못했습니다"
     private let store: CompanionStore
     private let inbox: CommandInbox
@@ -119,6 +149,9 @@ final class CompanionAppModel: ObservableObject {
             .appendingPathComponent(remoteCacheFilename)
         self.showPet = preferences.object(forKey: Self.showPetKey) as? Bool ?? true
         self.showPromptPreview = preferences.object(forKey: Self.showPromptPreviewKey) as? Bool ?? true
+        self.terminalNameSyncMode = TerminalNameSyncMode(
+            rawValue: preferences.string(forKey: Self.terminalNameSyncModeKey) ?? ""
+        ) ?? .manual
 
         lastEventByRemoteSession = RemoteEventCacheStore.load(from: remoteCacheURL)
         lastPersistedRemoteCacheData = try? RemoteEventCacheStore.encodedData(
@@ -621,7 +654,11 @@ final class CompanionAppModel: ObservableObject {
               let setIndex = sets.firstIndex(where: { $0.id == setID }),
               let memberIndex = sets[setIndex].members.firstIndex(where: { $0.id == memberID }) else { return }
         sets[setIndex].members[memberIndex].label = trimmed
+        let renamedMember = sets[setIndex].members[memberIndex]
         persistAndEvaluate()
+        if terminalNameSyncMode.syncsToCmux {
+            renameCmuxSurface(for: renamedMember, to: trimmed)
+        }
     }
 
     func setGroupPolicy(_ groupID: UUID, in setID: UUID, policy: GroupPolicy) {
@@ -716,6 +753,27 @@ final class CompanionAppModel: ObservableObject {
 
     func focus(_ member: WorkMember) {
         focus(windowID: member.windowID, workspaceID: member.workspaceID, surfaceID: member.surfaceID)
+    }
+
+    private func renameCmuxSurface(for member: WorkMember, to title: String) {
+        guard let surfaceID = member.surfaceID,
+              let client = commandClient else { return }
+        let workspaceID = member.workspaceID
+        let windowID = member.windowID
+        Task {
+            do {
+                try await client.renameSurface(
+                    surfaceID,
+                    title: title,
+                    workspaceID: workspaceID,
+                    windowID: windowID
+                )
+            } catch {
+                await MainActor.run {
+                    self.lastError = "cmux 터미널 이름을 변경하지 못했습니다: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     func focus(_ attachment: WorkAttachment) {
@@ -1381,7 +1439,7 @@ final class CompanionAppModel: ObservableObject {
                         title: surface.title ?? session?.agentDisplayName ?? session?.agent ?? surface.type ?? "Surface",
                         kind: kind,
                         url: surface.url.flatMap(URL.init(string:)),
-                        agent: session?.agent ?? session?.agentDisplayName,
+                        agent: session?.agent ?? session?.agentDisplayName ?? agentName(for: processWorkload),
                         sessionID: session?.id,
                         runtimeState: session.map(runtimeState(for:)) ?? taggedRuntimeState ?? .unknown,
                         lastSubmittedText: prompt?.text,
@@ -1437,6 +1495,7 @@ final class CompanionAppModel: ObservableObject {
         for setIndex in sets.indices {
             for memberIndex in sets[setIndex].members.indices {
                 var member = sets[setIndex].members[memberIndex]
+                let previousRuntimeState = member.runtimeState
                 var live: LiveSurface?
                 if let sessionID = member.sessionID {
                     live = surfaceBySession[sessionID]
@@ -1687,6 +1746,15 @@ final class CompanionAppModel: ObservableObject {
                 } else if topologyIsStale && member.runtimeState != .ended {
                     member.runtimeState = .stale
                 }
+                if terminalNameSyncMode.syncsFromCmux, let live,
+                   let syncedTitle = terminalTitleForSync(live) {
+                    member.label = syncedTitle
+                }
+                stampRuntimeStateChange(
+                    in: &member,
+                    previousRuntimeState: previousRuntimeState,
+                    now: now
+                )
                 sets[setIndex].members[memberIndex] = member
             }
 
@@ -1785,6 +1853,37 @@ final class CompanionAppModel: ObservableObject {
             member.lastSubmittedText = candidate.text
         default:
             break
+        }
+    }
+
+    private func stampRuntimeStateChange(
+        in member: inout WorkMember,
+        previousRuntimeState: MemberRuntimeState,
+        now: Date
+    ) {
+        guard member.runtimeState != previousRuntimeState else { return }
+        member.runtimeStateChangedAt = now
+    }
+
+    private func terminalTitleForSync(_ live: LiveSurface) -> String? {
+        guard !live.isBrowser else { return nil }
+        let title = live.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
+        let generic = [
+            "surface",
+            "terminal",
+            "shell",
+            "unknown",
+        ]
+        return generic.contains(title.lowercased()) ? nil : title
+    }
+
+    private func agentName(for workload: SurfaceWorkload?) -> String? {
+        switch workload {
+        case .codex?: return "codex"
+        case .claude?: return "claude"
+        case let .otherAgent(name)?: return name
+        default: return nil
         }
     }
 

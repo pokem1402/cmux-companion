@@ -272,6 +272,9 @@ final class CmuxTransportTests: XCTestCase {
             "0.1\t100\t4\tsurface\tsurface-codex\tpane-1\tcodex-reviewer",
             "0.0\t10\t1\tprocess\t50\tsurface-codex\tzsh",
             "0.0\t10\t1\tprocess\t51\t50\tssh",
+            "0.1\t100\t4\tsurface\tsurface-codex-waiting\tpane-1\tcodex-permission",
+            "0.0\t10\t1\tprocess\t55\tsurface-codex-waiting\tzsh",
+            "0.0\t10\t1\tprocess\t56\t55\tssh",
             "0.1\t100\t4\tsurface\tsurface-shell\tpane-1\told-claude-title",
             "0.0\t10\t1\tprocess\t60\tsurface-shell\tzsh",
             "0.0\t10\t1\tprocess\t61\t60\tssh",
@@ -279,7 +282,7 @@ final class CmuxTransportTests: XCTestCase {
 
         let snapshot = try CmuxTopSnapshot(tsv: tsv)
         XCTAssertEqual(snapshot.remoteProbeSurfaceIDs, [
-            "surface-claude", "surface-codex", "surface-shell",
+            "surface-claude", "surface-codex", "surface-codex-waiting", "surface-shell",
         ])
         XCTAssertEqual(snapshot.workload(forSurfaceID: "surface-claude"), .shell)
 
@@ -295,15 +298,23 @@ final class CmuxTransportTests: XCTestCase {
                 ◦ Working (12s • esc to interrupt)
                 gpt-5.6-sol xhigh fast · ~/workspace/project
                 """,
+            "surface-codex-waiting": """
+                Allow command?
+                ❯ 1. Yes, allow command
+                  2. No, and tell Codex what to do differently
+                gpt-5.6-sol xhigh fast · ~/workspace/project
+                """,
             "surface-shell": "gpt-5.6 · ~/workspace/project · shift+tab to cycle",
             "not-an-ssh-surface": "gpt-5.6 · ~/workspace/project",
         ])
 
         XCTAssertEqual(classified.workload(forSurfaceID: "surface-claude"), .claude)
         XCTAssertEqual(classified.workload(forSurfaceID: "surface-codex"), .codex)
+        XCTAssertEqual(classified.workload(forSurfaceID: "surface-codex-waiting"), .codex)
         XCTAssertEqual(classified.workload(forSurfaceID: "surface-shell"), .shell)
         XCTAssertEqual(classified.runtimeState(forSurfaceID: "surface-claude"), .waiting)
         XCTAssertEqual(classified.runtimeState(forSurfaceID: "surface-codex"), .running)
+        XCTAssertEqual(classified.runtimeState(forSurfaceID: "surface-codex-waiting"), .waiting)
         XCTAssertNil(classified.runtimeState(forSurfaceID: "surface-shell"))
         XCTAssertNil(classified.workload(forSurfaceID: "not-an-ssh-surface"))
     }
@@ -513,6 +524,27 @@ final class CmuxTransportTests: XCTestCase {
                 "focus-panel", "--panel", "surface-1",
                 "--workspace", "workspace-1", "--window", "window-1"
             ]
+        ])
+    }
+
+    func testRenameSurfaceUsesCmuxTabTitleCommand() async throws {
+        let runner = FakeCommandRunner(responses: [:], defaultResponse: .success("{}"))
+        let client = CmuxCommandClient(runner: runner)
+
+        try await client.renameSurface(
+            "surface-1",
+            title: "Review terminal",
+            workspaceID: "workspace-1",
+            windowID: "window-1"
+        )
+
+        XCTAssertEqual(runner.recordedArguments, [
+            [
+                "rename-tab", "--surface", "surface-1",
+                "--workspace", "workspace-1",
+                "--window", "window-1",
+                "Review terminal",
+            ],
         ])
     }
 

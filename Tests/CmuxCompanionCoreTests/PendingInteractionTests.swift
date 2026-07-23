@@ -24,6 +24,30 @@ final class PendingInteractionTests: XCTestCase {
         XCTAssertTrue(tracker.update(sets: [set], notifyTransitions: true).isEmpty)
     }
 
+    func testTrackerWaitsForAllRequiredReviewersBeforeCompletion() {
+        var first = WorkMember(label: "Claude", role: .reviewer, runtimeState: .running)
+        var second = WorkMember(label: "Codex", role: .reviewer, runtimeState: .running)
+        let group = WorkGroup(
+            label: "Reviewers",
+            role: .reviewer,
+            memberIDs: [first.id, second.id]
+        )
+        var set = WorkSet(label: "PR-42", armed: true, groups: [group], members: [first, second])
+        var tracker = InteractionTransitionTracker()
+
+        XCTAssertTrue(tracker.update(sets: [set], notifyTransitions: true).isEmpty)
+
+        first.runtimeState = .idle
+        set.members = [first, second]
+        XCTAssertTrue(tracker.update(sets: [set], notifyTransitions: true).isEmpty)
+
+        second.runtimeState = .idle
+        set.members = [first, second]
+        let interactions = tracker.update(sets: [set], notifyTransitions: true)
+        XCTAssertEqual(interactions.map(\.kind), [.completion])
+        XCTAssertEqual(interactions.first?.memberID, second.id)
+    }
+
     func testTrackerEmitsPersistentInputForRequiredWaitingMember() {
         var member = WorkMember(
             label: "Remote Claude",

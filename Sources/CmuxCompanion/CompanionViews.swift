@@ -54,7 +54,7 @@ struct CompanionRootView: View {
                                 evaluation: model.evaluations[set.id] ?? SetEvaluator.evaluate(set),
                                 forceExpanded: searchResults.isActive
                                     && searchResults.matchingSetIDs.contains(set.id),
-                                allowsReordering: !searchResults.isActive
+                                allowsReordering: !searchResults.isActive && !searchResults.usesDisplayOrder
                             )
                             .opacity(
                                 searchResults.isActive
@@ -183,7 +183,7 @@ struct CompanionRootView: View {
             .buttonStyle(.borderless)
             .help("화면 및 메뉴바 설정")
             .popover(isPresented: $showSettings, arrowEdge: .top) {
-                CompanionSettingsView(layout: layout)
+                CompanionSettingsView(model: model, layout: layout)
             }
         }
         .padding(12)
@@ -473,6 +473,7 @@ struct CompanionRootView: View {
 }
 
 private struct CompanionSettingsView: View {
+    @ObservedObject var model: CompanionAppModel
     @ObservedObject var layout: PopoverLayoutSettings
 
     private var widthBinding: Binding<Double> {
@@ -536,6 +537,20 @@ private struct CompanionSettingsView: View {
             Label("상단 메뉴바 위치", systemImage: "menubar.rectangle")
                 .font(.subheadline.weight(.semibold))
             Text("⌘ 키를 누른 채 Cmux Companion 아이콘을 좌우로 드래그하면 위치를 옮길 수 있습니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            Picker("터미널 이름 동기화", selection: $model.terminalNameSyncMode) {
+                ForEach(TerminalNameSyncMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+
+            Text("cmux 창 제목과 Companion 멤버 라벨을 필요할 때만 맞춥니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1170,6 +1185,9 @@ private struct MemberRow: View {
 
     var body: some View {
         let prompt = model.promptPreview(for: member)
+        let timestamp = member.runtimeState == .waiting
+            ? member.runtimeStateChangedAt
+            : prompt?.date
         HStack(alignment: .top, spacing: 8) {
             SurfaceDragHandle(
                 payload: SurfaceDragPayload(
@@ -1202,7 +1220,7 @@ private struct MemberRow: View {
                         Text(member.runtimeState.displayName)
                             .font(.caption)
                             .foregroundStyle(member.runtimeState.color)
-                        RelativeTimestamp(date: prompt?.date)
+                        RelativeTimestamp(date: timestamp)
                             .font(.caption2)
                     }
                     if model.showPromptPreview, let text = prompt?.text, !text.isEmpty {

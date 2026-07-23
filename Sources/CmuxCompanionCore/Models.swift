@@ -109,6 +109,7 @@ public struct WorkMember: Codable, Identifiable, Equatable, Sendable {
     public var workspaceID: String?
     public var windowID: String?
     public var runtimeState: MemberRuntimeState
+    public var runtimeStateChangedAt: Date?
     public var lastSubmittedText: String?
     public var lastSubmittedAt: Date?
     public var lastHeartbeatAt: Date?
@@ -127,6 +128,7 @@ public struct WorkMember: Codable, Identifiable, Equatable, Sendable {
         workspaceID: String? = nil,
         windowID: String? = nil,
         runtimeState: MemberRuntimeState = .unknown,
+        runtimeStateChangedAt: Date? = nil,
         lastSubmittedText: String? = nil,
         lastSubmittedAt: Date? = nil,
         lastHeartbeatAt: Date? = nil,
@@ -144,6 +146,7 @@ public struct WorkMember: Codable, Identifiable, Equatable, Sendable {
         self.workspaceID = workspaceID
         self.windowID = windowID
         self.runtimeState = runtimeState
+        self.runtimeStateChangedAt = runtimeStateChangedAt
         self.lastSubmittedText = lastSubmittedText
         self.lastSubmittedAt = lastSubmittedAt
         self.lastHeartbeatAt = lastHeartbeatAt
