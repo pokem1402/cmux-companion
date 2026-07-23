@@ -26,7 +26,12 @@ final class PendingInteractionTests: XCTestCase {
 
     func testTrackerWaitsForAllRequiredReviewersBeforeCompletion() {
         var first = WorkMember(label: "Claude", role: .reviewer, runtimeState: .running)
-        var second = WorkMember(label: "Codex", role: .reviewer, runtimeState: .running)
+        var second = WorkMember(
+            label: "Codex",
+            role: .reviewer,
+            runtimeState: .running,
+            lastSubmittedText: "Review the notification flow"
+        )
         let group = WorkGroup(
             label: "Reviewers",
             role: .reviewer,
@@ -41,11 +46,21 @@ final class PendingInteractionTests: XCTestCase {
         set.members = [first, second]
         XCTAssertTrue(tracker.update(sets: [set], notifyTransitions: true).isEmpty)
 
+        second.runtimeState = .waiting
+        set.members = [first, second]
+        let waitingInteractions = tracker.update(sets: [set], notifyTransitions: true)
+        XCTAssertEqual(waitingInteractions.map(\.kind), [.inputRequired])
+
+        second.runtimeState = .running
+        set.members = [first, second]
+        XCTAssertTrue(tracker.update(sets: [set], notifyTransitions: true).isEmpty)
+
         second.runtimeState = .idle
         set.members = [first, second]
         let interactions = tracker.update(sets: [set], notifyTransitions: true)
         XCTAssertEqual(interactions.map(\.kind), [.completion])
         XCTAssertEqual(interactions.first?.memberID, second.id)
+        XCTAssertEqual(interactions.first?.promptPreview, "Review the notification flow")
     }
 
     func testTrackerEmitsPersistentInputForRequiredWaitingMember() {
@@ -55,6 +70,7 @@ final class PendingInteractionTests: XCTestCase {
             agent: "claude",
             surfaceID: "surface-1",
             runtimeState: .running,
+            lastSubmittedText: "Ask user before deploy",
             isRemote: true
         )
         let group = WorkGroup(label: "Reviewer", role: .reviewer, memberIDs: [member.id])
@@ -70,6 +86,7 @@ final class PendingInteractionTests: XCTestCase {
         XCTAssertEqual(interactions.first?.replyCapability, .openTerminalOnly)
         XCTAssertEqual(interactions.first?.surfaceID, "surface-1")
         XCTAssertEqual(interactions.first?.isRemote, true)
+        XCTAssertEqual(interactions.first?.promptPreview, "Ask user before deploy")
     }
 
     func testTrackerSuppressesUnarmedAndOptionalWaitingMembers() {

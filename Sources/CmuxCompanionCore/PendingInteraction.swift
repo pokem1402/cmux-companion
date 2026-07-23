@@ -49,6 +49,7 @@ public struct PendingInteraction: Identifiable, Equatable, Sendable {
     public var memberTitle: String?
     public var agent: String?
     public var detail: String
+    public var promptPreview: String?
     public var options: [PendingInteractionOption]
     public var replyCapability: PendingInteractionReplyCapability
     public var sensitivity: PendingInteractionSensitivity
@@ -67,6 +68,7 @@ public struct PendingInteraction: Identifiable, Equatable, Sendable {
         memberTitle: String? = nil,
         agent: String? = nil,
         detail: String,
+        promptPreview: String? = nil,
         options: [PendingInteractionOption] = [],
         replyCapability: PendingInteractionReplyCapability = .openTerminalOnly,
         sensitivity: PendingInteractionSensitivity = .normal,
@@ -84,6 +86,7 @@ public struct PendingInteraction: Identifiable, Equatable, Sendable {
         self.memberTitle = memberTitle
         self.agent = agent
         self.detail = detail
+        self.promptPreview = promptPreview
         self.options = options
         self.replyCapability = replyCapability
         self.sensitivity = sensitivity
@@ -127,6 +130,7 @@ public struct PendingInteraction: Identifiable, Equatable, Sendable {
             memberTitle: member?.label,
             agent: member?.agent,
             detail: detail,
+            promptPreview: member?.lastSubmittedText,
             windowID: member?.windowID,
             workspaceID: member?.workspaceID,
             surfaceID: member?.surfaceID,
@@ -186,6 +190,7 @@ public struct InteractionTransitionTracker: Sendable {
                             memberTitle: member.label,
                             agent: member.agent,
                             detail: "사용자 입력 또는 승인이 필요합니다.",
+                            promptPreview: member.lastSubmittedText,
                             windowID: member.windowID,
                             workspaceID: member.workspaceID,
                             surfaceID: member.surfaceID,
@@ -196,7 +201,7 @@ public struct InteractionTransitionTracker: Sendable {
                 } else if previous == .running,
                           member.runtimeState == .idle || member.runtimeState == .ended {
                     if member.role == .reviewer,
-                       set.requiredReviewerGroupStillRunning(after: member.id) {
+                       !set.requiredReviewerGroupsAreCompleted(after: member.id) {
                         continue
                     }
                     interactions.append(
@@ -209,6 +214,7 @@ public struct InteractionTransitionTracker: Sendable {
                             memberTitle: member.label,
                             agent: member.agent,
                             detail: "현재 작업이 완료되었습니다.",
+                            promptPreview: member.lastSubmittedText,
                             windowID: member.windowID,
                             workspaceID: member.workspaceID,
                             surfaceID: member.surfaceID,
@@ -224,15 +230,23 @@ public struct InteractionTransitionTracker: Sendable {
 }
 
 private extension WorkSet {
-    func requiredReviewerGroupStillRunning(after completedMemberID: UUID) -> Bool {
-        groups.contains { group in
+    func requiredReviewerGroupsAreCompleted(after completedMemberID: UUID) -> Bool {
+        let affectedGroups = groups.filter { group in
             group.required
                 && group.role == .reviewer
                 && group.memberIDs.contains(completedMemberID)
-                && group.memberIDs.contains { memberID in
-                    memberID != completedMemberID
-                        && members.first(where: { $0.id == memberID })?.runtimeState == .running
+        }
+        guard !affectedGroups.isEmpty else { return true }
+        return affectedGroups.allSatisfy { group in
+            group.memberIDs.allSatisfy { memberID in
+                guard let member = members.first(where: { $0.id == memberID }) else {
+                    return false
                 }
+                if memberID == completedMemberID {
+                    return member.runtimeState == .idle || member.runtimeState == .ended
+                }
+                return member.runtimeState == .idle || member.runtimeState == .ended
+            }
         }
     }
 }

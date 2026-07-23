@@ -104,23 +104,50 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
     }
 
     private func body(for set: WorkSet, evaluation: SetEvaluation) -> String {
-        if includePromptPreview?() == true,
-           let member = set.members.first(where: { evaluation.attentionMemberIDs.contains($0.id) }),
-           let text = member.lastSubmittedText,
-           !text.isEmpty {
-            let compact = text.replacingOccurrences(of: "\n", with: " ")
-            return "\(member.label) · \(String(compact.prefix(150)))"
-        }
-
         if let member = set.members.first(where: { evaluation.attentionMemberIDs.contains($0.id) }) {
-            return "\(member.label): \(member.runtimeState.displayNameForNotification)"
+            return withPromptPreview(
+                "\(member.label): \(member.runtimeState.displayNameForNotification)",
+                member: member
+            )
         }
         let deficientLabels = set.groups
             .filter { evaluation.deficientGroupIDs.contains($0.id) }
             .map(\.label)
-        return deficientLabels.isEmpty
+        let fallback = deficientLabels.isEmpty
             ? "메뉴바에서 작업 상태를 확인하세요."
             : "\(deficientLabels.joined(separator: ", ")) 그룹을 확인하세요."
+        return withPromptPreview(fallback, member: latestPromptMember(in: set, evaluation: evaluation))
+    }
+
+    private func withPromptPreview(_ body: String, member: WorkMember?) -> String {
+        guard includePromptPreview?() == true,
+              let member,
+              let text = member.lastSubmittedText,
+              !text.isEmpty else {
+            return body
+        }
+        let compact = text.replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !compact.isEmpty else { return body }
+        return "\(body)\n\(member.label) · \(String(compact.prefix(150)))"
+    }
+
+    private func latestPromptMember(in set: WorkSet, evaluation: SetEvaluation) -> WorkMember? {
+        let deficientMemberIDs = Set(
+            set.groups
+                .filter { evaluation.deficientGroupIDs.contains($0.id) }
+                .flatMap(\.memberIDs)
+        )
+        let candidates = set.members.filter { member in
+            if deficientMemberIDs.isEmpty {
+                return member.lastSubmittedText?.isEmpty == false
+            }
+            return deficientMemberIDs.contains(member.id)
+                && member.lastSubmittedText?.isEmpty == false
+        }
+        return candidates.max { lhs, rhs in
+            (lhs.lastSubmittedAt ?? .distantPast) < (rhs.lastSubmittedAt ?? .distantPast)
+        }
     }
 
     private func requestAuthorizationIfNeeded(completion: @escaping (Bool) -> Void) {

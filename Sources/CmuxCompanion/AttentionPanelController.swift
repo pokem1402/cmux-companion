@@ -115,8 +115,11 @@ final class AttentionPanelController {
 
         presentationGeneration += 1
         let showsOptions = current.sensitivity == .normal && !current.options.isEmpty
+        let showsPrompt = current.sensitivity == .normal
+            && current.promptPreview?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         let optionsHeight: CGFloat = showsOptions ? 30 : 0
-        let height = Self.basePanelHeight + optionsHeight
+        let promptHeight: CGFloat = showsPrompt ? 30 : 0
+        let height = Self.basePanelHeight + optionsHeight + promptHeight
         panel.setContentSize(NSSize(width: Self.panelWidth, height: height))
         panel.contentView = FirstMouseInteractionHostingView(
             rootView: AttentionCardView(
@@ -252,6 +255,15 @@ private struct AttentionCardView: View {
             .nilIfEmpty
     }
 
+    private var promptPreview: String? {
+        guard interaction.sensitivity == .normal,
+              let prompt = interaction.promptPreview?
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !prompt.isEmpty else { return nil }
+        return String(prompt.prefix(180))
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             HStack(alignment: .top, spacing: 11) {
@@ -279,6 +291,12 @@ private struct AttentionCardView: View {
                         .font(.callout)
                         .foregroundStyle(.primary.opacity(0.9))
                         .lineLimit(2)
+                    if let promptPreview {
+                        Text("“\(promptPreview)”")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
                 }
                 Spacer(minLength: 4)
                 if pendingCount > 1 {
