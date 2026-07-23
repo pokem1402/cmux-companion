@@ -65,6 +65,67 @@ private func testEvaluator() throws {
     try require(!evaluation.shouldNotify, "completed generation must not notify")
 }
 
+private func testPendingInteractions() throws {
+    var member = WorkMember(
+        label: "Codex",
+        role: .worker,
+        agent: "codex",
+        surfaceID: "surface-1",
+        runtimeState: .running
+    )
+    let group = WorkGroup(label: "Worker", role: .worker, memberIDs: [member.id])
+    var set = WorkSet(label: "Interaction", armed: true, groups: [group], members: [member])
+    var tracker = InteractionTransitionTracker()
+
+    try require(
+        tracker.update(sets: [set], notifyTransitions: false).isEmpty,
+        "the first interaction snapshot must seed state without alerting"
+    )
+    member.runtimeState = .idle
+    set.members = [member]
+    let completion = tracker.update(sets: [set], notifyTransitions: true)
+    try require(
+        completion.count == 1 && completion[0].kind == .completion,
+        "running to idle must enqueue one completion card"
+    )
+    try require(
+        tracker.update(sets: [set], notifyTransitions: true).isEmpty,
+        "an unchanged idle state must not duplicate completion cards"
+    )
+
+    member.runtimeState = .running
+    set.members = [member]
+    _ = tracker.update(sets: [set], notifyTransitions: false)
+    member.runtimeState = .waiting
+    set.members = [member]
+    let input = tracker.update(sets: [set], notifyTransitions: true)
+    try require(
+        input.count == 1 && input[0].kind == .inputRequired,
+        "a required member entering waiting must enqueue one input card"
+    )
+    try require(
+        input[0].replyCapability == .openTerminalOnly,
+        "telemetry-only interactions must not claim direct reply support"
+    )
+
+    var queue = PendingInteractionQueue(maximumCount: 2)
+    queue.enqueue(
+        PendingInteraction(
+            id: "attention",
+            kind: .attention,
+            setID: set.id,
+            setTitle: set.label,
+            detail: "attention"
+        )
+    )
+    queue.enqueue(completion[0])
+    queue.enqueue(input[0])
+    try require(
+        queue.orderedItems.map(\.kind) == [.inputRequired, .completion],
+        "bounded interaction queues must retain input before completion and general attention"
+    )
+}
+
 private func testStoreInboxAndReducer(root: URL) throws {
     let storeURL = root.appendingPathComponent("sets.json")
     let inboxURL = root.appendingPathComponent("commands", isDirectory: true)
@@ -1352,6 +1413,7 @@ do {
     try FileManager.default.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: temporaryRoot) }
     try testEvaluator()
+    try testPendingInteractions()
     try testStoreInboxAndReducer(root: temporaryRoot)
     try testCrossSetOwnership()
     try testTargetSplitIdentity()

@@ -33,6 +33,16 @@ final class MenuBarController {
     var statusItemTitleForTesting: String { statusItem.button?.title ?? "" }
     var statusItemAutosaveNameForTesting: String? { statusItem.autosaveName }
     var popoverSizeForTesting: NSSize { popover.contentSize }
+    var attentionPanelAnchor: MenuBarStatusAnchor? {
+        guard let button = statusItem.button,
+              let window = button.window,
+              let screen = window.screen else { return nil }
+        let buttonRectInWindow = button.convert(button.bounds, to: nil)
+        return MenuBarStatusAnchor(
+            frame: window.convertToScreen(buttonRectInWindow),
+            screen: screen
+        )
+    }
 
     init(
         model: CompanionAppModel,

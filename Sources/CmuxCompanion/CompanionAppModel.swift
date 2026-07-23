@@ -67,6 +67,7 @@ final class CompanionAppModel: ObservableObject {
 
     var onEvaluationsChanged: (([WorkSet], [UUID: SetEvaluation]) -> Void)?
     var onAttentionTransition: ((WorkSet, SetEvaluation, SetEvaluation?) -> Void)?
+    var onInteractionTransition: ((PendingInteraction) -> Void)?
     var onPetVisibilityChanged: ((Bool) -> Void)?
 
     private static let showPetKey = "showFloatingPet"
@@ -87,6 +88,7 @@ final class CompanionAppModel: ObservableObject {
     private var started = false
     private var previousEvaluations: [UUID: SetEvaluation] = [:]
     private var lastNotificationFingerprints: [UUID: NotificationFingerprint] = [:]
+    private var interactionTransitionTracker = InteractionTransitionTracker()
     private var lastEventByRemoteSession: [String: RemoteEventState] = [:]
     private var lastPersistedRemoteCacheData: Data?
     private var pendingRemoteFrames: [CmuxEventFrame] = []
@@ -748,6 +750,26 @@ final class CompanionAppModel: ObservableObject {
         } else if let attachment = set.attachments.first {
             focus(attachment)
         }
+    }
+
+    func focus(_ interaction: PendingInteraction) {
+        if let set = sets.first(where: { $0.id == interaction.setID }),
+           let memberID = interaction.memberID,
+           let member = set.members.first(where: { $0.id == memberID }) {
+            focus(member)
+            return
+        }
+        if interaction.windowID != nil
+            || interaction.workspaceID != nil
+            || interaction.surfaceID != nil {
+            focus(
+                windowID: interaction.windowID,
+                workspaceID: interaction.workspaceID,
+                surfaceID: interaction.surfaceID
+            )
+            return
+        }
+        focusSet(interaction.setID)
     }
 
     func installHooks() {
@@ -1874,6 +1896,10 @@ final class CompanionAppModel: ObservableObject {
 
     private func recalculateEvaluations(notifyTransitions: Bool) {
         let current = Dictionary(uniqueKeysWithValues: sets.map { ($0.id, SetEvaluator.evaluate($0)) })
+        var interactions = interactionTransitionTracker.update(
+            sets: sets,
+            notifyTransitions: notifyTransitions
+        )
         if notifyTransitions {
             let currentSetIDs = Set(sets.map(\.id))
             for removedID in Array(lastNotificationFingerprints.keys) where !currentSetIDs.contains(removedID) {
@@ -1889,6 +1915,15 @@ final class CompanionAppModel: ObservableObject {
                 let fingerprint = NotificationFingerprint(set: set, evaluation: evaluation)
                 if lastNotificationFingerprints[set.id] != fingerprint {
                     onAttentionTransition?(set, evaluation, previous)
+                    let hasWaitingMember = evaluation.attentionMemberIDs.contains { memberID in
+                        set.members.first(where: { $0.id == memberID })?.runtimeState == .waiting
+                    }
+                    let hasCompletionTransition = interactions.contains {
+                        $0.setID == set.id && $0.kind == .completion
+                    }
+                    if !hasWaitingMember && !hasCompletionTransition {
+                        interactions.append(.attention(set: set, evaluation: evaluation))
+                    }
                 }
                 lastNotificationFingerprints[set.id] = fingerprint
             }
@@ -1896,6 +1931,9 @@ final class CompanionAppModel: ObservableObject {
         previousEvaluations = current
         evaluations = current
         onEvaluationsChanged?(sets, current)
+        for interaction in interactions {
+            onInteractionTransition?(interaction)
+        }
     }
 
     private func drainInbox() async {

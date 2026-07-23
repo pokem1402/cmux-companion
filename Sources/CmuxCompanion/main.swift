@@ -7,7 +7,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController!
     private var dashboard: DashboardWindowController!
     private var pet: FloatingPetController!
-    private var hud: TopHUDController!
+    private var attentionPanel: AttentionPanelController!
     private var notifications: NotificationCoordinator!
     private var updater: AppUpdateController!
     private var popoverLayout: PopoverLayoutSettings!
@@ -26,7 +26,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             onOpenDashboard: { [weak self] in self?.dashboard.show() }
         )
         pet = FloatingPetController()
-        hud = TopHUDController()
+        attentionPanel = AttentionPanelController(
+            anchorProvider: { [weak self] in self?.menuBar.attentionPanelAnchor }
+        )
         notifications = NotificationCoordinator()
         configureMainMenu()
 
@@ -42,21 +44,24 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         notifications.includePromptPreview = { [weak self] in
             self?.model.showPromptPreview == true
         }
+        attentionPanel.onOpen = { [weak self] interaction in
+            self?.model.focus(interaction)
+        }
 
         pet.onClick = { [weak self] in self?.menuBar.showPopover() }
         model.onPetVisibilityChanged = { [weak self] visible in self?.pet.setVisible(visible) }
         model.onEvaluationsChanged = { [weak self] sets, evaluations in
             guard let self else { return }
             self.notifications.update(sets: sets, evaluations: evaluations)
+            self.attentionPanel.reconcile(sets: sets, evaluations: evaluations)
             self.updatePet(sets: sets, evaluations: evaluations)
         }
         model.onAttentionTransition = { [weak self] set, evaluation, _ in
             guard let self else { return }
             self.notifications.schedule(set: set, evaluation: evaluation)
-            let detail = evaluation.status == .attention
-                ? "사용자 입력, 연결 또는 오류 상태를 확인하세요."
-                : "필수 Worker/Reviewer 그룹이 작업 중이 아닙니다."
-            self.hud.show(title: set.label, detail: detail, status: evaluation.status)
+        }
+        model.onInteractionTransition = { [weak self] interaction in
+            self?.attentionPanel.enqueue(interaction)
         }
 
         pet.setVisible(model.showPet)
@@ -67,6 +72,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         dashboard.prepareForTermination()
+        attentionPanel.hide()
         model.stop()
         updater.stop()
     }

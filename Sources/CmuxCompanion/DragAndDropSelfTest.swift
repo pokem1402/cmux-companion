@@ -1228,10 +1228,30 @@ enum DragAndDropSelfTest {
         {"windows":[{"id":"00000000-0000-0000-0000-000000000103","workspaces":[{"id":"\#(workspaceID)","title":"Local","panes":[{"id":"00000000-0000-0000-0000-000000000104","surfaces":[{"id":"\#(surfaceID)","type":"terminal","title":"Codex"}]}]}]}]}
         """#))
         let store = CompanionStore(url: root.appendingPathComponent("sets.json"))
+        let trackedMember = WorkMember(
+            label: "Codex",
+            role: .worker,
+            surfaceID: surfaceID
+        )
+        let trackedGroup = WorkGroup(
+            label: "Worker",
+            role: .worker,
+            memberIDs: [trackedMember.id]
+        )
+        try store.save(CompanionSnapshot(sets: [
+            WorkSet(
+                label: "Local interaction",
+                armed: true,
+                groups: [trackedGroup],
+                members: [trackedMember]
+            )
+        ]))
         let model = CompanionAppModel(
             store: store,
             inbox: CommandInbox(directoryURL: root.appendingPathComponent("commands", isDirectory: true))
         )
+        var interactions: [PendingInteraction] = []
+        model.onInteractionTransition = { interactions.append($0) }
 
         func snapshot(status: String) throws -> CmuxTransportSnapshot {
             let top = try CmuxTopSnapshot(tsv: [
@@ -1263,9 +1283,20 @@ enum DragAndDropSelfTest {
         }
 
         model.applySnapshotForSelfTest(try snapshot(status: "Idle"))
-        guard model.liveSurfaces[0].runtimeState == .idle else {
+        guard model.liveSurfaces[0].runtimeState == .idle,
+              interactions.map(\.kind) == [.completion] else {
             throw DragAndDropSelfTestError.assertion(
-                "local Codex top tag did not update the live-surface state to idle"
+                "local Codex running-to-idle did not emit one completion interaction"
+            )
+        }
+
+        model.applySnapshotForSelfTest(try snapshot(status: "Running"))
+        model.applySnapshotForSelfTest(try snapshot(status: "Needs Input"))
+        guard model.liveSurfaces[0].runtimeState == .waiting,
+              interactions.map(\.kind) == [.completion, .inputRequired],
+              interactions.last?.surfaceID == surfaceID else {
+            throw DragAndDropSelfTestError.assertion(
+                "local Codex waiting state did not emit one surface-correlated input interaction"
             )
         }
     }
@@ -1345,8 +1376,13 @@ enum DragAndDropSelfTest {
 
         func model(member: WorkMember, name: String) throws -> CompanionAppModel {
             let store = CompanionStore(url: root.appendingPathComponent("\(name)-sets.json"))
+            let group = WorkGroup(
+                label: "Workers",
+                role: member.role,
+                memberIDs: [member.id]
+            )
             try store.save(CompanionSnapshot(sets: [
-                WorkSet(label: name, members: [member]),
+                WorkSet(label: name, armed: true, groups: [group], members: [member]),
             ]))
             return CompanionAppModel(
                 store: store,
@@ -1363,6 +1399,8 @@ enum DragAndDropSelfTest {
             runtimeState: .unknown
         )
         let remoteModel = try model(member: linkedMember, name: "remote-alias")
+        var remoteInteractions: [PendingInteraction] = []
+        remoteModel.onInteractionTransition = { remoteInteractions.append($0) }
         // Match cold-start ordering: the event can be replayed from the cursor
         // before the first tree snapshot establishes UUID/ref aliases.
         remoteModel.captureRemoteEventForSelfTest(try event(
@@ -1413,9 +1451,45 @@ enum DragAndDropSelfTest {
         }
 
         remoteModel.captureRemoteEventForSelfTest(try event(
-            hookName: "SessionEnd",
+            hookName: "PermissionRequest",
             source: "codex",
             sequence: 4,
+            nativeSession: "codex-session"
+        ))
+        remoteModel.applySnapshotForSelfTest(try snapshot())
+        guard remoteModel.sets[0].members[0].runtimeState == .waiting,
+              remoteInteractions.map(\.kind) == [.inputRequired],
+              remoteInteractions[0].isRemote else {
+            throw DragAndDropSelfTestError.assertion(
+                "remote permission telemetry did not emit one input interaction"
+            )
+        }
+
+        remoteModel.captureRemoteEventForSelfTest(try event(
+            hookName: "UserPromptSubmit",
+            source: "codex",
+            sequence: 5,
+            nativeSession: "codex-session"
+        ))
+        remoteModel.applySnapshotForSelfTest(try snapshot())
+        remoteModel.captureRemoteEventForSelfTest(try event(
+            hookName: "Stop",
+            source: "codex",
+            sequence: 6,
+            nativeSession: "codex-session"
+        ))
+        remoteModel.applySnapshotForSelfTest(try snapshot())
+        guard remoteModel.sets[0].members[0].runtimeState == .idle,
+              remoteInteractions.map(\.kind) == [.inputRequired, .completion] else {
+            throw DragAndDropSelfTestError.assertion(
+                "remote running-to-stop telemetry did not emit one completion interaction"
+            )
+        }
+
+        remoteModel.captureRemoteEventForSelfTest(try event(
+            hookName: "SessionEnd",
+            source: "codex",
+            sequence: 7,
             nativeSession: "codex-session"
         ))
         remoteModel.applySnapshotForSelfTest(try snapshot())

@@ -11,6 +11,14 @@ The repository builds three deliverables:
 - `cmux-set`: a terminal helper for manually linking the current cmux surface.
 - `remote-hook-bridge.sh`: a telemetry bridge for agents running through `cmux ssh`.
 
+For armed linked sets, the app also presents interaction cards directly below
+the menu bar. A required member waiting for input stays visible until it is
+resolved or dismissed, while a member transitioning from running to idle or
+ended produces a short completion card. Local and remote interactions are
+prioritized and deduplicated together, and `Open in cmux` focuses the captured
+terminal. Agent replies still happen in the original terminal because the hook
+streams provide lifecycle telemetry, not a safe response channel.
+
 ## Status model
 
 Members are tracked as `running`, `waiting`, `idle`, `ended`, `stale`,
@@ -51,18 +59,18 @@ To produce the two assets required by the in-app updater, set the release
 version and monotonically increasing build number, then run:
 
 ```bash
-CMUX_COMPANION_VERSION=0.1.11 \
-CMUX_COMPANION_BUILD_NUMBER=12 \
+CMUX_COMPANION_VERSION=0.1.12 \
+CMUX_COMPANION_BUILD_NUMBER=13 \
 ./scripts/package-release.sh
 ```
 
 The helper rebuilds the app, sanitizes metadata, creates the ZIP and SHA-256
 sidecar under `dist/release/`, then extracts and verifies the result. For a tag
-named `v0.1.11`, upload both assets without renaming them:
+named `v0.1.12`, upload both assets without renaming them:
 
 ```text
-CmuxCompanion-v0.1.11-macos-arm64.zip
-CmuxCompanion-v0.1.11-macos-arm64.zip.sha256
+CmuxCompanion-v0.1.12-macos-arm64.zip
+CmuxCompanion-v0.1.12-macos-arm64.zip.sha256
 ```
 
 These names are exact: the updater ignores a release if either asset is absent
